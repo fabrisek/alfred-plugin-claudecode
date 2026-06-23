@@ -1,0 +1,72 @@
+{
+  "name": "@alfred-plugin/claude-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@alfred/sdk": "*",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "alfred": {
+    "id": "claude-code",
+    "displayName": "Claude (subscription)",
+    "description": "Use your Claude.ai Pro/Max subscription as an Alfred LLM provider — no API key, no per-token billing. Drives Claude Code headlessly via the official Agent SDK; inference counts against your subscription quota.",
+    "main": "src/index.ts",
+    "engine": {
+      "protocolVersion": ">=1.0.0"
+    },
+    "contributes": {
+      "providers": [
+        { "id": "claude-code", "displayName": "Claude (subscription)" }
+      ]
+    },
+    "bundler": {
+      "external": ["@anthropic-ai/claude-agent-sdk"]
+    },
+    "install": {
+      "runScripts": ["@anthropic-ai/claude-agent-sdk"]
+    },
+    "configSchema": {
+      "oauthToken": {
+        "type": "string",
+        "label": "Setup token (optional)",
+        "description": "Long-lived subscription token from `claude setup-token`. Leave empty to reuse the credentials from an interactive `claude` login (~/.claude/.credentials.json). Either way, billing goes against your Claude.ai subscription, NOT the API.",
+        "secret": true,
+        "required": false,
+        "group": "Authentication"
+      },
+      "models": {
+        "type": "string",
+        "label": "Models",
+        "description": "Comma-separated list of models to expose in the picker. Use aliases (opus, sonnet, haiku) to always track the latest, or pin full ids (e.g. claude-opus-4-8). Optional display name after a pipe: 'opus|Claude Opus'.",
+        "default": "opus, sonnet, haiku",
+        "group": "Catalog"
+      },
+      "contextWindow": {
+        "type": "number",
+        "label": "Context window",
+        "description": "Context window (tokens) reported for every exposed model. Used by the UI for the context gauge.",
+        "default": 200000,
+        "min": 1000,
+        "step": 1000,
+        "group": "Catalog"
+      },
+      "pathToClaude": {
+        "type": "string",
+        "label": "Path to claude executable (optional)",
+        "description": "Absolute path to the `claude` CLI binary. Leave empty to use the one bundled with the Agent SDK, or the one on your PATH.",
+        "default": "",
+        "group": "Advanced"
+      }
+    }
+  }
+}
