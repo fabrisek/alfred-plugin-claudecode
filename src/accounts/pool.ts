@@ -461,6 +461,13 @@ export class AccountPool {
     this.save();
   }
 
+  clearExhausted(id: string): void {
+    const rt = this.runtime(id);
+    delete rt.exhaustedUntil;
+    delete rt.exhaustedReason;
+    this.save();
+  }
+
   markAuthFailed(id: string, reason: string): void {
     this.runtime(id).authFailed = reason;
     this.save();

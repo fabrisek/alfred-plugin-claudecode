@@ -1,0 +1,63 @@
+// Run: node --import <tsx> --test tests/cutter.test.ts
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { ToolCallCutter } from '../src/toolCallCutter.js';
+
+const NS = ['antml', ':'].join('');
+
+/** Feeds `text` in `step`-sized deltas; returns what was forwarded and whether it stopped. */
+function run(text: string, step: number): { out: string; stopped: boolean } {
+  const c = new ToolCallCutter();
+  let out = '';
+  for (let i = 0; i < text.length; i += step) {
+    const r = c.push(text.slice(i, i + step));
+    out += r.text;
+    if (r.stop) return { out, stopped: true };
+  }
+  return { out: out + c.flush(), stopped: false };
+}
+
+const CALL = '<tool_call>{"name": "task_get", "arguments": {"id": "t-1"}}</tool_call>';
+
+describe('ToolCallCutter', () => {
+  it('passes plain text through untouched', () => {
+    for (const step of [1, 3, 50]) {
+      assert.deepEqual(run('Hello <b>world</b>, a < b.', step), { out: 'Hello <b>world</b>, a < b.', stopped: false });
+    }
+  });
+
+  it('cuts a fabricated tool result after the call', () => {
+    const text = `Let me check.\n${CALL}\n*Tool result (task_get):*\nt-1 title: invented`;
+    for (const step of [1, 2, 7, 1000]) {
+      const r = run(text, step);
+      assert.equal(r.stopped, true);
+      assert.equal(r.out, `Let me check.\n${CALL}`);
+    }
+  });
+
+  it('keeps back-to-back calls', () => {
+    const text = `${CALL}\n\n${CALL}\nthen chatter`;
+    for (const step of [1, 5, 1000]) {
+      const r = run(text, step);
+      assert.equal(r.stopped, true);
+      assert.equal(r.out, `${CALL}\n\n${CALL}`);
+    }
+  });
+
+  it('lets a reply that ends on its call finish normally', () => {
+    assert.deepEqual(run(`ok ${CALL}\n`, 4), { out: `ok ${CALL}`, stopped: false });
+  });
+
+  it('closes an open function_calls wrapper on the cut', () => {
+    const inv = `<${NS}invoke name="now">\n</${NS}invoke>`;
+    const text = `<${NS}function_calls>\n${inv}\nTool result: invented`;
+    const r = run(text, 3);
+    assert.equal(r.stopped, true);
+    assert.equal(r.out, `<${NS}function_calls>\n${inv}\n</${NS}function_calls>`);
+  });
+
+  it('accepts a closed wrapper followed by nothing but whitespace', () => {
+    const text = `<function_calls>\n<invoke name="now">\n</invoke>\n</function_calls>\n`;
+    assert.deepEqual(run(text, 2), { out: text.trimEnd(), stopped: false });
+  });
+});

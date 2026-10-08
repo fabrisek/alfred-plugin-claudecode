@@ -265,11 +265,15 @@ export class SessionRunner {
 
   private async execute(run: Internal, first: Account): Promise<RunReport> {
     const { pool, logger } = this.opts;
-    const wall = setTimeout(() => {
-      run.timedOut = true;
-      run.abortAttempt?.();
-    }, this.opts.config.timeoutMs);
-    wall.unref?.();
+    // `timeoutMs: 0` = no wall clock.
+    const wall =
+      this.opts.config.timeoutMs > 0
+        ? setTimeout(() => {
+            run.timedOut = true;
+            run.abortAttempt?.();
+          }, this.opts.config.timeoutMs)
+        : undefined;
+    wall?.unref?.();
 
     const tried = new Set<string>();
     let account: Account | undefined = first;
@@ -352,7 +356,8 @@ export class SessionRunner {
     const options: Record<string, unknown> = {
       model: req.model,
       cwd: req.cwd,
-      maxTurns: req.maxTurns,
+      // `0` = no turn cap: omit the option entirely.
+      ...(req.maxTurns > 0 ? { maxTurns: req.maxTurns } : {}),
       permissionMode: req.permissionMode,
       allowedTools: config.allowedTools,
       // Anything not pre-approved is refused instead of prompting: a prompt

@@ -144,7 +144,10 @@ export function registerSessionTools(ctx: PluginContext, runner: SessionRunner):
           description: `plan = read-only planning; acceptEdits = edit files and run the allowed tools. Cannot exceed the configured mode (${cfg.permissionMode}).`,
         },
         sessionId: { type: 'string', description: 'Continue this earlier session instead of starting a new one.' },
-        maxTurns: { type: 'number', description: `Turn cap for this run (default ${cfg.maxTurns}).` },
+        maxTurns: {
+          type: 'number',
+          description: `Optional turn cap for this run (default ${cfg.maxTurns > 0 ? cfg.maxTurns : 'none'}).`,
+        },
         background: { type: 'boolean', description: 'Return a runId at once and keep running; poll claude_code_status.' },
       },
       required: ['prompt'],
@@ -152,7 +155,10 @@ export function registerSessionTools(ctx: PluginContext, runner: SessionRunner):
     // The chat layer's own 30 s cap is waived; the worker RPC gets the
     // session budget plus slack, so the run's own timeout always fires first.
     longRunning: true,
-    timeoutMs: cfg.timeoutMs + 120_000,
+    // The host insists on a bound for a long-running plugin tool; with no
+    // session wall clock that bound is a week, i.e. none in practice (use
+    // background:true + claude_code_status for anything that long anyway).
+    timeoutMs: cfg.timeoutMs > 0 ? cfg.timeoutMs + 120_000 : 7 * 24 * 3_600_000,
     async run(input) {
       const args = input.args ?? {};
       const prompt = str(args.prompt);
@@ -168,7 +174,7 @@ export function registerSessionTools(ctx: PluginContext, runner: SessionRunner):
       const effort = str(args.effort);
       if (effort && !EFFORTS.includes(effort)) return fail('invalid_args', `effort must be one of ${EFFORTS.join(', ')}.`);
       const turnsArg = Number(args.maxTurns);
-      const maxTurns = Number.isFinite(turnsArg) && turnsArg > 0 ? Math.min(1000, Math.round(turnsArg)) : cfg.maxTurns;
+      const maxTurns = Number.isFinite(turnsArg) && turnsArg > 0 ? Math.round(turnsArg) : cfg.maxTurns;
       const model = splitModel(str(args.model) || cfg.model).model;
 
       const sessionId = str(args.sessionId) || undefined;

@@ -14,6 +14,7 @@ import { Deadline, isAbortLike, noopLogger } from '@alfred/provider-openai-compa
 import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from './accounts/pool.js';
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
+import { ToolCallCutter } from './toolCallCutter.js';
 
 /** Backend label prefixed to every error this provider surfaces. */
 const LABEL = 'Claude Code';
@@ -323,10 +324,25 @@ export class ClaudeCodeProvider implements LLMProvider {
       // provider declares `tools: false`, so Alfred encodes its tool protocol
       // as text), which is exactly the case compact descriptions exist for.
       inlinesToolSchemas: true,
-      // Every request is its own CLI process on a subscription seat, so the
-      // backend isn't the bottleneck the way a local model is: these replace
-      // the host's conservative local-backend ceilings (8) for
-      // `delegate_parallel`. Both are plugin settings.
+      // A thinking model can pause between deltas; only a really long total
+      // silence means the CLI is gone. Host ceiling is 10 min.
+      streamIdleTimeoutMs: 10 * 60_000,
+
+      // ---- run limits (packages/core/src/llm/runLimits.ts) -----------------
+      // A subscription seat is not a local GPU serving two requests: Alfred
+      // must not throttle Claude. `0` = unlimited for every key below. What
+      // stays: the user's Stop, the host's repeated-tool-call warning, and the
+      // dead-CLI detectors above (first output, stream silence).
+      maxIterations: 0,
+      maxAutoContinue: 0,
+      maxDelegationDepth: 0,
+      // Sub-agents call chat() (non-streaming); the CLI's own exit/error is
+      // the dead-backend signal, so no host wall clock on a generation.
+      chatTimeoutMs: 0,
+      // A silent sub-agent is reported, not killed.
+      stallPolicy: 'warn',
+      // Every request is its own CLI process on a seat. Plugin settings;
+      // `0` (the default) = unlimited.
       maxConcurrentRequests: this.opts.config.maxConcurrentRequests,
       maxParallelTasks: this.opts.config.maxParallelTasks,
       // Thinking mode maps onto the CLI's `--effort` (native CLI only), one
@@ -343,7 +359,10 @@ export class ClaudeCodeProvider implements LLMProvider {
       // Alfred's own prompt-encoded protocol is Qwen-style `<tool_call>` JSON,
       // and that is the only textual protocol this provider's replies can
       // contain — Claude never emits Hermes XML unprompted.
-      textToolCallFormats: ['qwen_json'],
+      // Claude also falls back on its own `<invoke name=…>` syntax now and
+      // then; declaring it lets the host execute those calls instead of
+      // leaving raw markup in the reply.
+      textToolCallFormats: ['qwen_json', 'claude_xml'],
     };
   }
 
@@ -505,6 +524,8 @@ export class ClaudeCodeProvider implements LLMProvider {
       account: account.id,
       messages: req.messages.length,
       images: built.images,
+      // What actually reaches the CLI as `--effort` (absent = CLI default).
+      effort: (options.extraArgs as Record<string, unknown> | undefined)?.effort ?? null,
     });
 
     let assembledContent = '';
@@ -528,6 +549,9 @@ export class ClaudeCodeProvider implements LLMProvider {
     // Usage of the latest API message, for when the CLI is stopped before
     // its `result` (re-emitted tool calls, cut replies).
     let stepUsage: SdkUsage | undefined;
+    // Ends the reply right after its tool call(s) — see toolCallCutter.ts.
+    const cutter = new ToolCallCutter();
+    let rawText = '';
     let cutAfterToolCall = false;
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
@@ -579,9 +603,18 @@ export class ClaudeCodeProvider implements LLMProvider {
                 // First real output: the CLI is alive, so stop policing the
                 // clock. A long answer is not a stalled request.
                 deadline.disarmTimeout();
-                assembledContent += text;
                 sawStreamedText = true;
-                yield { type: 'text', delta: text };
+                rawText += text;
+                const cut = cutter.push(text);
+                if (cut.text) {
+                  assembledContent += cut.text;
+                  yield { type: 'text', delta: cut.text };
+                }
+                if (cut.stop) {
+                  cutAfterToolCall = true;
+                  finishReason = 'stop';
+                  break;
+                }
               }
             } else if (delta.type === 'thinking_delta') {
               const thinking = (delta as SdkThinkingDelta).thinking ?? '';
@@ -628,10 +661,14 @@ export class ClaudeCodeProvider implements LLMProvider {
             for (const block of am.message.content ?? []) {
               if (block.type === 'text') {
                 const text = (block as { text: string }).text ?? '';
-                if (text) {
+                if (text && !cutAfterToolCall) {
                   deadline.disarmTimeout();
-                  assembledContent += text;
-                  yield { type: 'text', delta: text };
+                  const cut = cutter.push(text);
+                  if (cut.text) {
+                    assembledContent += cut.text;
+                    yield { type: 'text', delta: cut.text };
+                  }
+                  if (cut.stop) cutAfterToolCall = true;
                 }
               } else if (block.type === 'thinking') {
                 assembledThinking += (block as { thinking: string }).thinking ?? '';
@@ -692,6 +729,14 @@ export class ClaudeCodeProvider implements LLMProvider {
           }
         }
       }
+      if (/<\/?(?:[a-z]+:)?(?:invoke|function_calls|parameter)\b/.test(rawText)) {
+        // Claude's own call syntax leaked into text: keep the raw shape for
+        // diagnosis (the host only ever sees the cleaned version).
+        this.log.info('claude-native call markup in reply', {
+          account: account.id,
+          raw: rawText.slice(0, 4_000),
+        });
+      }
       if (nativeCalls.length > 0 && !cutAfterToolCall) {
         // No `message_stop` seen (partial messages off): emit them now.
         const markup = renderNativeCalls(nativeCalls);
@@ -708,6 +753,12 @@ export class ClaudeCodeProvider implements LLMProvider {
           controller.abort();
         } catch {
           // already gone
+        }
+      } else {
+        const rest = cutter.flush();
+        if (rest) {
+          assembledContent += rest;
+          yield { type: 'text', delta: rest };
         }
       }
     } catch (err) {

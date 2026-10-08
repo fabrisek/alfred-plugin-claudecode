@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/session.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
@@ -134,9 +134,9 @@
       "maxConcurrentRequests": {
         "type": "number",
         "label": "Max concurrent requests",
-        "description": "How many requests Alfred may run on this provider at once. delegate_parallel runs one sub-agent fewer than this, keeping a slot for the calling agent. Each request is its own CLI process on a seat. Needs a plugin reload.",
-        "default": 16,
-        "min": 1,
+        "description": "How many requests Alfred may run on this provider at once. 0 = unlimited (every sub-agent of a delegate_parallel call starts at once). Each request is its own CLI process on a seat. Needs a plugin reload.",
+        "default": 0,
+        "min": 0,
         "max": 64,
         "step": 1,
         "group": "Delegation"
@@ -144,9 +144,9 @@
       "maxParallelTasks": {
         "type": "number",
         "label": "Max sub-agents per parallel call",
-        "description": "How many sub-agents one delegate_parallel call may fan out to (the extra ones queue behind the concurrency limit). Needs a plugin reload.",
-        "default": 32,
-        "min": 1,
+        "description": "How many sub-agents one delegate_parallel call may fan out to. 0 = unlimited. Needs a plugin reload.",
+        "default": 0,
+        "min": 0,
         "max": 64,
         "step": 1,
         "group": "Delegation"
@@ -187,18 +187,18 @@
       "sessionTimeoutMs": {
         "type": "number",
         "label": "Session timeout (ms)",
-        "description": "Wall-clock budget of one Claude Code session; it is stopped after this. The tool's own host timeout is derived from it (needs a plugin reload).",
-        "default": 1800000,
-        "min": 60000,
+        "description": "Wall-clock budget of one Claude Code session; it is stopped after this. 0 = none (the session runs until Claude is done or is cancelled). Needs a plugin reload.",
+        "default": 0,
+        "min": 0,
         "step": 60000,
         "group": "Sessions"
       },
       "sessionMaxTurns": {
         "type": "number",
         "label": "Session max turns",
-        "description": "Default turn cap of one session (a call may set its own maxTurns).",
-        "default": 200,
-        "min": 1,
+        "description": "Default turn cap of one session (a call may set its own maxTurns). 0 = no cap.",
+        "default": 0,
+        "min": 0,
         "step": 1,
         "group": "Sessions"
       }

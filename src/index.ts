@@ -51,9 +51,14 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
       raw.requestTimeoutMs > 0
         ? raw.requestTimeoutMs
         : 120_000,
-    maxConcurrentRequests: Math.round(positive(raw.maxConcurrentRequests, 16)),
-    maxParallelTasks: Math.round(positive(raw.maxParallelTasks, 32)),
+    maxConcurrentRequests: limitOrUnlimited(raw.maxConcurrentRequests),
+    maxParallelTasks: limitOrUnlimited(raw.maxParallelTasks),
   };
+}
+
+/** `0` / absent / invalid = unlimited (`0`, the host convention). */
+function limitOrUnlimited(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.round(v) : 0;
 }
 
 function positive(v: unknown, fallback: number): number {
@@ -70,8 +75,10 @@ function resolveSessionConfig(raw: Record<string, unknown>, cfg: ClaudeCodeConfi
     permissionMode: isPermissionMode(raw.sessionPermissionMode) ? raw.sessionPermissionMode : 'acceptEdits',
     allowedTools: tools.length > 0 ? tools : DEFAULT_SESSION_TOOLS,
     model: String(raw.sessionModel ?? '').trim() || firstModel(cfg.modelsRaw),
-    timeoutMs: positive(raw.sessionTimeoutMs, 30 * 60_000),
-    maxTurns: Math.round(positive(raw.sessionMaxTurns, 200)),
+    // `0` = no wall clock / no turn cap: the session ends when Claude is done
+    // (or on Cancel).
+    timeoutMs: limitOrUnlimited(raw.sessionTimeoutMs),
+    maxTurns: limitOrUnlimited(raw.sessionMaxTurns),
     startTimeoutMs: cfg.requestTimeoutMs,
   };
 }
@@ -333,6 +340,29 @@ const plugin: AlfredPlugin = {
       'setPreferred',
       safe((args) => {
         pool.setPreferred(requireId(args));
+        return {};
+      }),
+    );
+
+    // Seat availability by hand: `clearExhausted` puts a seat back in rotation
+    // before its recorded reset (the user knows the window rolled over, or
+    // the limit was raised); `markExhausted` takes one out for a while — also
+    // the seam the end-to-end campaign uses to exercise seat switching.
+    ctx.registerAction(
+      'markExhausted',
+      safe((args) => {
+        const id = requireId(args);
+        const minutes = Number((args as { minutes?: unknown }).minutes ?? 60);
+        const until = Date.now() + (Number.isFinite(minutes) && minutes > 0 ? minutes : 60) * 60_000;
+        pool.markExhausted(id, until, String((args as { reason?: unknown }).reason ?? 'marked exhausted by hand'));
+        return { exhaustedUntil: until };
+      }),
+    );
+
+    ctx.registerAction(
+      'clearExhausted',
+      safe((args) => {
+        pool.clearExhausted(requireId(args));
         return {};
       }),
     );
