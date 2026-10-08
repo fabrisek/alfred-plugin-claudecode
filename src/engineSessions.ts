@@ -33,6 +33,8 @@ export const CACHE_TTL_5M = 5 * 60_000;
 export const CACHE_TTL_1H = 60 * 60_000;
 /** Live CLI processes kept at once; the least recently used idle one is closed beyond. */
 export const MAX_LIVE_SESSIONS = 8;
+/** A sub-agent's process idle this long is closed (it resumes on its next request). */
+export const TASK_IDLE_MS = 2 * 60_000;
 /** Records untouched for this long are forgotten (their cache is long gone). */
 const RECORD_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
@@ -331,7 +333,7 @@ export class EngineSessions {
   }
 
   /** The request is over: close the process once the seat's prompt cache would have expired. */
-  release(session: LiveSession): void {
+  release(session: LiveSession, opts: { task?: boolean } = {}): void {
     session.busy = false;
     session.lastUsed = Date.now();
     if (session.idleTimer) clearTimeout(session.idleTimer);
@@ -339,9 +341,13 @@ export class EngineSessions {
       this.live.delete(session.key);
       return;
     }
-    const ttl = this.ttlFor(session.accountId);
+    // A sub-agent between two tool calls comes back within seconds; one that
+    // stays silent was stopped (or its parent gave up), and nothing would ever
+    // tell this process. Closing it early is free: the prompt cache lives on
+    // the server, and the next request resumes the same session.
+    const ttl = opts.task ? Math.min(TASK_IDLE_MS, this.ttlFor(session.accountId)) : this.ttlFor(session.accountId);
     session.idleTimer = setTimeout(() => {
-      if (!session.busy) this.close(session.key, 'prompt cache expired');
+      if (!session.busy) this.close(session.key, opts.task ? 'sub-agent idle' : 'prompt cache expired');
     }, ttl);
     session.idleTimer.unref?.();
   }
@@ -350,7 +356,7 @@ export class EngineSessions {
     const s = this.live.get(key);
     if (!s) return;
     this.live.delete(key);
-    if (!s.dead) this.log.info('closing Claude engine session', { reason, account: s.accountId });
+    if (!s.dead) this.log.info('closing Claude engine session', { reason, account: s.accountId, thread: key });
     s.close();
   }
 

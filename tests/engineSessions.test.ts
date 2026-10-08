@@ -142,6 +142,27 @@ describe('engine sessions: one CLI session per conversation', () => {
     p.dispose();
   });
 
+  it('sends an image a tool returned with the tool result, in the same session', async () => {
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4IyKCFTEMLQkAmD9BAZzFjLYAAAAASUVORK5CYII=';
+    const cliFake = fakeCli((n) => (n === 1 ? call(1) : 'red'));
+    __setQueryForTests(cliFake.fn);
+    const p = provider(makePool(), mkdtempSync(join(dir, 's-')));
+    const msgs: Message[] = [{ role: 'system', content: SYSTEM }, { role: 'user', content: 'screenshot it' }];
+    await send(p, msgs);
+    msgs.push({ role: 'assistant', content: '', toolCalls: [{ id: 'a', name: 'adb_screenshot', arguments: {} }] });
+    msgs.push({ role: 'tool', name: 'adb_screenshot', content: 'captured' });
+    // What the host's expandToolImagesForLlm adds after an image-bearing tool result.
+    msgs.push({ role: 'user', content: '[image returned by adb_screenshot]', images: [png] });
+    assert.equal(await send(p, msgs), 'red');
+    assert.equal(cliFake.spawns.length, 1);
+    assert.deepEqual(cliFake.spawns[0].inputs[1], [
+      'Tool result (adb_screenshot):\ncaptured',
+      'User:\n[image returned by adb_screenshot]',
+      '[image]',
+    ]);
+    p.dispose();
+  });
+
   it('resumes the same session on the same seat after the process went away (restart)', async () => {
     const sessionsDir = mkdtempSync(join(dir, 's-'));
     const pool = makePool();
@@ -221,6 +242,23 @@ describe('engine sessions: process lifetime', () => {
     assert.equal((await ask()).content, 'result');
     assert.equal(sessions.liveCount(), 0, 'answered: closed');
     assert.equal(cliFake.spawns.length, 1);
+    p.dispose();
+  });
+
+  it('closes a stopped sub-agent process once it stays idle (nothing else would tell it)', async () => {
+    const cliFake = fakeCli(() => call(1));
+    __setQueryForTests(cliFake.fn);
+    const pool = makePool();
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const sessions = (p as unknown as { sessions: EngineSessions }).sessions;
+    cliFake.state.cacheBreakdown = false;
+    sessions.noteTtl(pool.list()[0].id, 20);
+    // Its last reply called a tool; then the user pressed Stop: no next request.
+    await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'task brief' }], session: { key: 'conv-1|dev|t-2', task: true } });
+    assert.equal(sessions.liveCount(), 1);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(sessions.liveCount(), 0);
+    assert.equal(cliFake.spawns[0].closed, true);
     p.dispose();
   });
 

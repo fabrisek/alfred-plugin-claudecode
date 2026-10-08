@@ -1048,7 +1048,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             // so a later message to that thread resumes the same session.
             sessions.close(live.key, requestAborted ? 'sub-agent stopped' : 'sub-agent finished');
           } else {
-            sessions.release(live);
+            sessions.release(live, { task: req.session?.task });
           }
         }
       }
