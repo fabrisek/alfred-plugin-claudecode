@@ -18,7 +18,7 @@ try {
   const creds = await readCredentials(pool.credentialsPath(def));
   const u = await fetchUsage(creds!.accessToken!, creds!.expiresAt);
   console.log('usage api', JSON.stringify(u));
-  const p = new ClaudeCodeProvider({ config: { oauthToken: '', modelsRaw: 'haiku', contextWindow: 200000, pathToClaude: '', requestTimeoutMs: 60000 }, pool, cli, logger });
+  const p = new ClaudeCodeProvider({ config: { oauthToken: '', modelsRaw: 'haiku', contextWindow: 200000, pathToClaude: '', requestTimeoutMs: 60000, maxConcurrentRequests: 16, maxParallelTasks: 32 }, pool, cli, logger });
   const red = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4IyKCFTEMLQkAmD9BAZzFjLYAAAAASUVORK5CYII=';
   let text = '';
   for await (const c of p.stream({ model: 'haiku', providerOptions: { claudeEffort: 'low' }, messages: [

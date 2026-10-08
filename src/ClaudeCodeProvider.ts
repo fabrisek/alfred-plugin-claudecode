@@ -40,6 +40,10 @@ export type ClaudeCodeConfig = {
    * that carries real output, so a long answer is never cut short.
    */
   requestTimeoutMs: number;
+  /** Requests the host may run on this provider at once (sub-agent fan-out). */
+  maxConcurrentRequests: number;
+  /** Sub-agents one `delegate_parallel` call may fan out to. */
+  maxParallelTasks: number;
 };
 
 export type ClaudeCodeProviderOptions = {
@@ -307,9 +311,11 @@ export class ClaudeCodeProvider implements LLMProvider {
       // as text), which is exactly the case compact descriptions exist for.
       inlinesToolSchemas: true,
       // Every request is its own CLI process on a subscription seat, so the
-      // backend isn't the bottleneck the way a local model is: let
-      // `delegate_parallel` use the host's full fan-out.
-      maxConcurrentRequests: 9,
+      // backend isn't the bottleneck the way a local model is: these replace
+      // the host's conservative local-backend ceilings (8) for
+      // `delegate_parallel`. Both are plugin settings.
+      maxConcurrentRequests: this.opts.config.maxConcurrentRequests,
+      maxParallelTasks: this.opts.config.maxParallelTasks,
       // Thinking mode maps onto the CLI's `--effort` (native CLI only), one
       // mode per effort level; the UI offers exactly these. There is no "off"
       // for adaptive thinking, so it is not declared: a conversation still

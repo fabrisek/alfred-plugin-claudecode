@@ -42,6 +42,8 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
       raw.requestTimeoutMs > 0
         ? raw.requestTimeoutMs
         : 120_000,
+    maxConcurrentRequests: Math.round(positive(raw.maxConcurrentRequests, 16)),
+    maxParallelTasks: Math.round(positive(raw.maxParallelTasks, 32)),
   };
 }
 

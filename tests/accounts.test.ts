@@ -223,7 +223,7 @@ const limitTurn = [
 ];
 
 describe('provider failover', () => {
-  const cfg = { oauthToken: '', modelsRaw: 'opus', contextWindow: 200000, pathToClaude: '', requestTimeoutMs: 5000 };
+  const cfg = { oauthToken: '', modelsRaw: 'opus', contextWindow: 200000, pathToClaude: '', requestTimeoutMs: 5000, maxConcurrentRequests: 16, maxParallelTasks: 32 };
   const cli = { path: '', native: false, source: 'bundled' as const };
 
   it('moves to the next seat when the first is out of quota before any chunk', async () => {

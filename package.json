@@ -93,6 +93,26 @@
         "step": 1000,
         "group": "Advanced"
       },
+      "maxConcurrentRequests": {
+        "type": "number",
+        "label": "Max concurrent requests",
+        "description": "How many requests Alfred may run on this provider at once. delegate_parallel runs one sub-agent fewer than this, keeping a slot for the calling agent. Each request is its own CLI process on a seat. Needs a plugin reload.",
+        "default": 16,
+        "min": 1,
+        "max": 64,
+        "step": 1,
+        "group": "Delegation"
+      },
+      "maxParallelTasks": {
+        "type": "number",
+        "label": "Max sub-agents per parallel call",
+        "description": "How many sub-agents one delegate_parallel call may fan out to (the extra ones queue behind the concurrency limit). Needs a plugin reload.",
+        "default": 32,
+        "min": 1,
+        "max": 64,
+        "step": 1,
+        "group": "Delegation"
+      },
       "pathToClaude": {
         "type": "string",
         "label": "Path to claude executable (optional)",
