@@ -245,7 +245,7 @@ export class ClaudeEventMapper {
   private blockTools = new Map<string, string>();
   private readonly thinking = new Map<string, string>();
   /** Sub-agents by task id, and the Agent tool_use that spawned each. */
-  private readonly subagents = new Map<string, { toolUseId?: string }>();
+  private readonly subagents = new Map<string, { toolUseId?: string; background: boolean }>();
   private readonly subagentByToolUse = new Map<string, string>();
   private modelAnnounced = false;
 
@@ -351,7 +351,7 @@ export class ClaudeEventMapper {
         if (m.task_type !== 'local_agent' && !m.subagent_type) return [];
         const id = String(m.task_id ?? '');
         const toolUseId = typeof m.tool_use_id === 'string' ? m.tool_use_id : undefined;
-        this.subagents.set(id, { toolUseId });
+        this.subagents.set(id, { toolUseId, background: m.is_backgrounded === true });
         if (toolUseId) this.subagentByToolUse.set(toolUseId, id);
         return [
           {
@@ -525,11 +525,13 @@ export class ClaudeEventMapper {
       });
       if (tool && ok && isPlanningTool(tool.name)) out.push(...this.planning(tool.name, tool.input, structured));
       // The sub-agent's own end usually comes from task_notification; this
-      // covers CLIs that do not send one.
+      // covers CLIs that do not send one. Not for a background sub-agent: its
+      // tool result only acknowledges the launch ("Async agent launched"),
+      // the agent itself keeps running and reports through task_notification.
       const sub = this.subagentByToolUse.get(id);
       if (sub) {
         this.subagentByToolUse.delete(id);
-        if (this.subagents.delete(sub)) {
+        if (!this.subagents.get(sub)?.background && this.subagents.delete(sub)) {
           out.push({ type: 'subagent_end', subagentId: sub, status: ok ? 'completed' : 'failed', result: capText(resultText(b.content), 64_000) });
         }
       }

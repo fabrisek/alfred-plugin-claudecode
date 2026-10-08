@@ -88,6 +88,8 @@ type Scenario = {
   onMessage?: (m: Record<string, unknown>, ctx: Ctx, state: Record<string, unknown>) => void;
   setup?: (cwd: string) => void;
   options?: Record<string, unknown>;
+  /** Keep stdin open past the turn's result until a background sub-agent reports its end. */
+  awaitBackgroundEnd?: boolean;
 };
 
 const sessions: Record<string, string> = {};
@@ -98,6 +100,11 @@ const SCENARIOS: Record<string, Scenario> = {
     setup: (cwd) => writeFileSync(join(cwd, 'a.txt'), 'colour=red\n'),
     prompt:
       'Do these steps with your tools, no commentary: 1) Read a.txt. 2) Run the shell command `echo fixture` with Bash. 3) Edit a.txt replacing red with blue. Then reply "done".',
+  },
+  'subagent-background': {
+    awaitBackgroundEnd: true,
+    prompt:
+      'Use the Agent tool with run_in_background set to true to launch ONE general-purpose sub-agent whose job is: "Run the Bash command `sleep 8 && echo pong` and reply with its output only." Do not wait for it and do not check on it: as soon as it is launched, reply "launched" and end your turn.',
   },
   subagent: {
     prompt:
@@ -207,11 +214,16 @@ async function run(name: string, sc: Scenario): Promise<void> {
       if (typeof m.session_id === 'string' && m.session_id && !sessions[name]) sessions[name] = m.session_id;
       sc.onMessage?.(m, ctx, state);
       if (m.type === 'user' && m.isReplay === true) echoed += 1;
+      if (m.type === 'system' && m.subtype === 'task_notification') state.backgroundEnded = true;
+      if (sc.awaitBackgroundEnd && state.backgroundEnded && !state.closing) {
+        state.closing = true;
+        setTimeout(() => input.close(), 1_500);
+      }
       if (m.type === 'result') {
         results += 1;
         // One result can close several inputs: a message sent mid-turn is
         // folded into the running turn (its replay echo precedes the result).
-        if (echoed >= inputs) {
+        if (echoed >= inputs && !sc.awaitBackgroundEnd) {
           // Give the CLI a moment to emit anything trailing, then close stdin.
           setTimeout(() => input.close(), 1_500);
         }

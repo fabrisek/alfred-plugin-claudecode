@@ -1044,14 +1044,37 @@ function mapStopReason(reason: string | null | undefined): ChatResponse['finishR
   return 'stop';
 }
 
-function mergeUsage(
+/**
+ * Folds an API usage block into the response usage.
+ *
+ * With prompt caching, `input_tokens` is only the uncached tail of the prompt
+ * (often 2 or 3 tokens); the bulk sits in `cache_read_input_tokens` and
+ * `cache_creation_input_tokens`. Reporting `input_tokens` alone made every
+ * Claude turn read "2 tokens sent" and left the context meter near zero, so
+ * the prompt size is their sum, with the cache split kept alongside.
+ */
+export function mergeUsage(
   existing: ChatResponse['usage'],
   incoming: SdkUsage,
 ): ChatResponse['usage'] {
   const base = existing ?? {};
+  const read = incoming.cache_read_input_tokens;
+  const written = incoming.cache_creation_input_tokens;
+  const hasCache = typeof read === 'number' || typeof written === 'number';
+  const prompt =
+    typeof incoming.input_tokens === 'number' || hasCache
+      ? (incoming.input_tokens ?? 0) + (read ?? 0) + (written ?? 0)
+      : undefined;
   return {
     ...base,
-    inputTokens: incoming.input_tokens ?? base.inputTokens,
+    inputTokens: prompt ?? base.inputTokens,
     outputTokens: incoming.output_tokens ?? base.outputTokens,
+    ...(hasCache && prompt !== undefined
+      ? {
+          cachedInputTokens: read ?? 0,
+          uncachedInputTokens: prompt - (read ?? 0),
+          cacheSource: 'request' as const,
+        }
+      : {}),
   };
 }

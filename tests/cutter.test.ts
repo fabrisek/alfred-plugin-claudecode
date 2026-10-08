@@ -61,3 +61,44 @@ describe('ToolCallCutter', () => {
     assert.deepEqual(run(text, 2), { out: text.trimEnd(), stopped: false });
   });
 });
+
+describe('ToolCallCutter — degraded spellings and loops', () => {
+  it('treats a named invoke as a call and cuts the invented tail after it', () => {
+    // Production, 2026-10-08: the dev agent closed its last call and went on
+    // to invent that "every tool returns empty".
+    const call = '<invoke_task_blocked>\n<parameter name="id">t-7c981797</parameter>\n</invoke_task_blocked>';
+    const text = `<invoke_grep>\n<parameter name="pattern">x</parameter>\n</invoke_grep>\n\n${call}\nIt is impossible to work: my tools return no output.`;
+    for (const step of [1, 4, 1000]) {
+      const r = run(text, step);
+      assert.equal(r.stopped, true);
+      assert.equal(r.out, text.slice(0, text.indexOf('\nIt is impossible')));
+    }
+  });
+
+  it('ends a reply that keeps re-opening an empty wrapper', () => {
+    const text = 'Reading.\n\n<function_calls>\n\n\n<function_calls>\n\n\n<function_calls>\n'.repeat(3);
+    for (const step of [1, 5, 1000]) {
+      const r = run(text, step);
+      assert.equal(r.stopped, true);
+      assert.ok((r.out.match(/<function_calls>/g) ?? []).length <= 2, r.out);
+    }
+  });
+
+  it('ends a reply on the third copy of the same call, holding it back', () => {
+    const inv = '<function_calls>\n<invoke name="read_file">\n<parameter name="path">/a.ts</parameter>\n</invoke>';
+    const text = `${inv}\n\n${inv}\n\n${inv}\n\n${inv}`;
+    for (const step of [1, 7, 1000]) {
+      const r = run(text, step);
+      assert.equal(r.stopped, true);
+      assert.equal((r.out.match(/<invoke /g) ?? []).length, 2);
+      assert.ok(r.out.trimEnd().endsWith('</function_calls>'));
+    }
+  });
+
+  it('caps the number of calls in one reply', () => {
+    const calls = Array.from({ length: 40 }, (_, i) => `<invoke name="task_get">\n<parameter name="id">t-${i}</parameter>\n</invoke>`);
+    const r = run(calls.join('\n'), 50);
+    assert.equal(r.stopped, true);
+    assert.equal((r.out.match(/<invoke /g) ?? []).length, 25);
+  });
+});

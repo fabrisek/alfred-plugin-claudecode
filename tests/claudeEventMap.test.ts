@@ -85,6 +85,25 @@ describe('claudeEventMap: fixtures', () => {
     assert.equal(of(events, 'subagent_end').length, 1, 'not ended twice by the tool result');
   });
 
+  it('background sub-agent: running until its own end, not until the launch is acknowledged', () => {
+    // Recorded with run_in_background: the Agent tool returns "Async agent
+    // launched" at once, while the sub-agent goes on for seconds. Ending it on
+    // that tool result showed it finished while it ran, and dropped its
+    // progress and its real end.
+    const { events } = replay('subagent-background');
+    const [start] = of(events, 'subagent_start');
+    assert.equal(start.background, true);
+    const order = events
+      .filter((e) => e.type === 'subagent_progress' || e.type === 'subagent_end' || (e.type === 'assistant' && e.parentToolUseId === start.parentToolUseId))
+      .map((e) => e.type);
+    assert.deepEqual(order.slice(-2), ['assistant', 'subagent_end'], 'ends after its own last message');
+    assert.ok(order.includes('subagent_progress'), 'its progress is not dropped');
+    const ends = of(events, 'subagent_end');
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].subagentId, start.subagentId);
+    assert.equal(ends[0].status, 'completed');
+  });
+
   it('a plain Bash task (local_bash) is not a sub-agent', () => {
     const { events } = replay('midturn');
     assert.equal(of(events, 'subagent_start').length, 0);
@@ -176,5 +195,21 @@ describe('claudeEventMap: synthetic shapes not capturable live', () => {
     assert.equal(res.type, 'tool_result');
     assert.ok(res.type === 'tool_result' && res.output.length < 270_000);
     assert.deepEqual(res.type === 'tool_result' && res.structured, { truncated: true, bytes: 400_023 });
+  });
+});
+
+describe('engine-mode usage (ClaudeCodeProvider.mergeUsage)', () => {
+  it('counts the cached prompt, not just its uncached tail', async () => {
+    const { mergeUsage } = await import('../src/ClaudeCodeProvider.js');
+    // The message_delta usage of the recorded "plain" stream.
+    const delta = loadFixture('plain')
+      .map((m) => (m as { event?: { type?: string; usage?: Record<string, number> } }).event)
+      .find((e) => e?.type === 'message_delta')!.usage!;
+    assert.equal(delta.input_tokens, 10);
+    const usage = mergeUsage(undefined, delta)!;
+    assert.equal(usage.inputTokens, 10 + 3385 + 21961);
+    assert.equal(usage.cachedInputTokens, 21961);
+    assert.equal(usage.uncachedInputTokens, 10 + 3385);
+    assert.equal(usage.outputTokens, 39);
   });
 });
