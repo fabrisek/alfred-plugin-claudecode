@@ -657,13 +657,15 @@ describe('Claude panel usage zone', () => {
     assert.deepEqual(page.errors, []);
     assert.deepEqual(page.parseIssues, []);
     assert.equal(page.$('useBody')!.hidden, false);
-    // Overview, stacked by seat, since the first day with data (at least 7 days).
+    // Overview, stacked by seat, since the first record: per hour while the
+    // history is under three days old (26 h here), per day otherwise.
     assert.equal(btn(page, 'uview', 'overview')!.className, 'on');
-    assert.equal(hits(page), 7);
+    assert.equal(hits(page), 27);
+    assert.match(page.$('useChart')!.innerHTML, /(1h)/);
     await page.type(page.$('usePeriod'), '30');
     assert.equal(hits(page), 30);
     await page.type(page.$('usePeriod'), '0');
-    assert.equal(hits(page), 7);
+    assert.equal(hits(page), 27);
     assert.equal(page.doc.querySelectorAll('#useChart svg').length, 1, 'one chart');
     assert.match(page.$('useLegend')!.textContent, /A.*B.*unattributed \(before tracking\)/);
     const strip = page.$('useStrip')!.textContent.replace(/\s+/g, ' ');

@@ -96,6 +96,9 @@ th.r, td.r { text-align: right; }
 tbody tr:hover td { background: var(--panel-2); }
 tbody tr:last-child td { border-bottom: none; }
 tr.cur td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+tr.next td:first-child { box-shadow: inset 2px 0 0 var(--accent-strong); }
+.tag.next { color: var(--accent-strong); border-color: currentColor; }
+.pill { white-space: nowrap; }
 tr.off td { opacity: .55; }
 tr.sub td { background: var(--panel-2); }
 tr.sub .what { padding-left: 24px; }
@@ -535,17 +538,20 @@ function activityRows(list) {
 
 var STATUS_PILL = { active: 'info', ok: 'ok', exhausted: 'warn', 'logged out': 'err', 'auth failed': 'err', disabled: 'idle' };
 
-function meter(w, threshold, mode) {
+function meter(w, threshold, mode, label, hideReset) {
   if (!w) return '';
   var p = w.percent == null ? null : Math.max(0, Math.min(100, w.percent));
   var cls = p == null ? '' : p >= 100 ? 'err' : p >= threshold ? 'warn' : '';
-  var when = w.resetsAt ? (mode === 'date'
+  var when = w.resetsAt && !hideReset ? (mode === 'date'
     ? '<span title="Resets ' + esc(fmtWhen(w.resetsAt)) + '">' + esc(fmtWhen(w.resetsAt)) + '</span>'
     : '<span title="Resets ' + esc(fmtClock(w.resetsAt)) + '">' + live('left', w.resetsAt) + '</span>') : '';
-  return '<span class="meter"><span class="bar ' + cls + '"><i style="width:' + (p || 0) + '%"></i></span>'
+  return '<span class="meter">' + (label ? '<span class="w">' + esc(label) + '</span>' : '')
+    + '<span class="bar ' + cls + '"><i style="width:' + (p || 0) + '%"></i></span>'
     + '<span class="p">' + (p == null ? '?' : Math.round(p) + '%') + '</span>'
     + '<span class="when">' + when + '</span></span>';
 }
+
+function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
 
 function todayOf(id) {
   if (!usage || !usage.daily || !usage.daily[id] || !usage.days || !usage.days.length) return null;
@@ -560,17 +566,20 @@ function seatRows(s) {
   var last = s.accounts.length - 1;
   var orderTitle = s.settings.strategy === 'fill'
     ? 'Order of use: the first usable seat serves, the next one takes over when it is exhausted or disabled'
-    : 'Order of use (spread balances by usage; order only breaks ties)';
+    : 'Seat order: breaks ties between seats';
   s.accounts.forEach(function (a, i) {
     var u = a.usage || { windows: [] };
     var five = u.windows.filter(function (w) { return w.key === 'five_hour'; })[0];
     var week = u.windows.filter(function (w) { return w.key === 'seven_day'; })[0];
     var scoped = u.windows.filter(function (w) { return w.model; });
-    var scopedText = scoped.map(function (w) { return esc(w.model) + ' ' + (w.percent == null ? '?' : Math.round(w.percent) + '%'); }).join(' \\u00b7 ');
-    var scopedTitle = scoped.map(function (w) { return (w.label || w.model) + ': ' + (w.percent == null ? '?' : Math.round(w.percent) + '%') + (w.resetsAt ? ', resets ' + fmtWhen(w.resetsAt) : ''); }).join('\\n');
+    var scopedTitle = scoped.map(function (w) {
+      return 'Weekly limit on ' + cap(w.model) + ' models: ' + (w.percent == null ? '?' : Math.round(w.percent) + '%') + (w.resetsAt ? ', resets ' + fmtWhen(w.resetsAt) : '');
+    }).join('\\n');
     var twins = (byEmail[a.email] || []).filter(function (l) { return l !== a.label; });
     var plan = usage && usage.plans ? usage.plans[a.id] : null;
-    var tags = (plan ? ' <span class="tag" title="' + esc(a.subscriptionType || '') + '">' + esc(plan.label) + '</span>'
+    var isNext = s.next && s.next.id === a.id;
+    var tags = (isNext ? ' <span class="tag next" title="' + esc('Next new conversation goes here: ' + s.next.why) + '">next</span>' : '')
+      + (plan ? ' <span class="tag" title="' + esc(a.subscriptionType || '') + '">' + esc(plan.label) + '</span>'
         : a.subscriptionType ? ' <span class="tag">' + esc(a.subscriptionType) + '</span>' : '')
       + (a.auth === 'token' ? ' <span class="tag">token</span>' : '')
       + (a.exposeModels ? ' <span class="tag" title="model@seat variants are listed in the model picker">pinned</span>' : '')
@@ -582,21 +591,33 @@ function seatRows(s) {
     var todayCell = today
       ? '<span class="num" title="' + esc(['Today, API-equivalent'].concat(breakdownLines([today[0], today[1], today[2], today[3]], [today[4], today[5], today[6], today[7]])).join('\\n')) + '">' + fmtUsd(usdOf(today)) + '</span>'
       : '<span class="muted">\\u2014</span>';
-    var html = '<tr class="' + (a.status === 'active' ? 'cur' : '') + (a.enabled ? '' : ' off') + '">'
+    // Status says when an exhausted seat is back; the 5h bar does not repeat it.
+    var back = a.exhaustedUntil;
+    var sameReset = back && five && five.resetsAt && Math.abs(five.resetsAt - back) < 3 * 60000;
+    var status = '<span class="pill ' + (STATUS_PILL[a.status] || 'idle') + '" title="' + esc((a.statusDetail || '') + (back ? (a.statusDetail ? ' \\u00b7 ' : '') + 'back ' + fmtWhen(back) : '')) + '">'
+      + esc(a.status) + (back ? ' \\u00b7 back in ' + live('left', back) : '') + '</span>'
+      + (a.inFlight ? ' <span class="tag info">' + a.inFlight + ' running</span>' : '')
+      + (u.stale ? ' <span class="tag" title="Usage not refreshed: ' + esc(u.stale) + '">stale</span>' : '');
+    // Week: the all-models weekly window when the plan has one; else the
+    // per-model weekly limit (Team plans: Fable only), named as such.
+    var weekCell = week
+      ? meter(week, s.settings.threshold, 'date') + (scoped.length ? ' <span class="muted small c-wide" title="' + esc(scopedTitle) + '">'
+        + scoped.map(function (w) { return esc(cap(w.model)) + ' ' + (w.percent == null ? '?' : Math.round(w.percent) + '%'); }).join(' \\u00b7 ') + '</span>' : '')
+      : scoped.length
+        ? '<span title="' + esc('No all-models weekly limit on this plan.\\n' + scopedTitle) + '">' + meter(scoped[0], s.settings.threshold, 'date', cap(scoped[0].model) + ' only') + '</span>'
+        : '<span class="muted" title="No weekly limit reported">\\u2014</span>';
+    var html = '<tr class="' + (a.status === 'active' ? 'cur' : '') + (isNext ? ' next' : '') + (a.enabled ? '' : ' off') + '">'
       + '<td class="ord" title="' + orderTitle + '"><span class="pos">' + (i + 1) + '</span>'
       + '<button class="mv" data-act="up" data-id="' + esc(a.id) + '"' + (i === 0 || bz('order') ? ' disabled' : '') + ' title="Move up">\\u25b2</button>'
       + '<button class="mv" data-act="down" data-id="' + esc(a.id) + '"' + (i === last || bz('order') ? ' disabled' : '') + ' title="Move down">\\u25bc</button></td>'
       + '<td class="name"><div title="' + esc(a.label + ' \\u00b7 ' + (a.email || a.id) + (a.orgName ? ' \\u00b7 ' + a.orgName : '')) + '"><b>' + esc(a.label) + '</b>' + tags
       + (a.email && a.email !== a.label ? ' <span class="muted small c-wide">' + esc(a.email) + '</span>' : '') + '</div></td>'
-      + '<td><span class="pill ' + (STATUS_PILL[a.status] || 'idle') + '" title="' + esc(a.statusDetail || (u.stale ? 'Usage not refreshed: ' + u.stale : '')) + '">' + esc(a.status) + '</span>'
-      + (a.inFlight ? ' <span class="tag info">' + a.inFlight + ' running</span>' : '')
-      + (a.exhaustedUntil ? ' <span class="muted small" title="Back ' + esc(fmtWhen(a.exhaustedUntil)) + '">back in ' + live('left', a.exhaustedUntil) + '</span>' : '')
-      + (u.stale ? ' <span class="tag" title="Usage not refreshed: ' + esc(u.stale) + '">stale</span>' : '') + '</td>'
-      + '<td>' + (meter(five, s.settings.threshold, 'count') || '<span class="muted">\\u2014</span>') + '</td>'
-      + '<td>' + (meter(week, s.settings.threshold, 'date') || '<span class="muted">\\u2014</span>')
-      + (scoped.length ? ' <span class="muted small c-wide" title="' + esc(scopedTitle) + '">' + scopedText + '</span>' : '') + '</td>'
+      + '<td>' + status + '</td>'
+      + '<td>' + (meter(five, s.settings.threshold, 'count', '', sameReset) || '<span class="muted">\\u2014</span>') + '</td>'
+      + '<td>' + weekCell + '</td>'
       + '<td class="r c-opt"><span class="num small" title="' + esc(tallyTitle('5h window', t.window5h) + '\\n' + tallyTitle('Week', t.week) + '\\n' + tallyTitle('Total', t.total)) + '">'
-      + fmtTokens(t.window5h.output) + ' out \\u00b7 ' + fmtTokens(sumIn(t.window5h)) + ' in</span></td>'
+      + fmtTokens(t.window5h.output) + ' out \\u00b7 ' + fmtTokens(sumIn(t.window5h)) + ' in'
+      + (t.window5h.costUsd ? ' \\u00b7 ' + fmtUsd(t.window5h.costUsd) : '') + '</span></td>'
       + '<td class="r">' + todayCell + '</td>'
       + '<td><div class="acts">'
       + (needsLogin ? '<button class="primary" data-act="login" data-id="' + esc(a.id) + '"' + bz('login') + '>Log in</button>' : '')
@@ -732,7 +753,7 @@ function pollUsage() {
   usageTimer = 0;
   if (usagePolling) return Promise.resolve();
   usagePolling = true;
-  return call('usageHistory', { since: usage ? usage.version : null }).then(function (r) {
+  return call('usageHistory', { since: usage ? usage.version : null, hours: 72 }).then(function (r) {
     if (r.unchanged) {
       if (usage) usage.scan = r.scan;
       renderUsageStatus();
@@ -856,6 +877,14 @@ function grouped(days, rows) {
   return { labels: labels, rows: out, weekly: true };
 }
 
+// Top of the axis: the next round value (1, 2, 2.5 or 5 x 10^n) above the tallest bar.
+function niceMax(v) {
+  if (!(v > 0) || !Number.isFinite(v)) return 0;
+  var p = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+  var m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+
 // Stacked bars at a given pixel size. cols: [{ label, title, segs: [{ v, cls }] }].
 function barChart(cols, o) {
   var W = Math.max(60, Math.round(o.w || 720));
@@ -865,7 +894,10 @@ function barChart(cols, o) {
   var padB = axis ? 15 : 1;
   var padT = 5;
   var max = o.max || 0;
-  if (!max) cols.forEach(function (c) { var s = 0; c.segs.forEach(function (g) { s += g.v; }); if (s > max) max = s; });
+  if (!max) {
+    cols.forEach(function (c) { var s = 0; c.segs.forEach(function (g) { s += g.v; }); if (s > max) max = s; });
+    max = niceMax(max);
+  }
   var plotW = W - padL - 1;
   var plotH = H - padT - padB;
   var n = Math.max(1, cols.length);
@@ -892,7 +924,7 @@ function barChart(cols, o) {
       parts += '<rect class="' + sg.cls + '" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1)
         + '" height="' + Math.max(0.6, h > 3 ? h - 1 : h).toFixed(1) + '"/>';
     });
-    out += '<g class="col"><title>' + esc(c.title) + '</title>' + parts
+    out += '<g class="col"' + (c.raw ? ' data-tok="' + c.raw[0] + '" data-usd="' + c.raw[1] + '"' : '') + '><title>' + esc(c.title) + '</title>' + parts
       + '<rect class="hit" x="' + (padL + i * step).toFixed(1) + '" y="' + padT + '" width="' + step.toFixed(1) + '" height="' + plotH + '"/></g>';
     if (axis && c.label && i % every === 0) {
       out += '<text class="ax" x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - 3) + '" text-anchor="middle">' + esc(c.label) + '</text>';
@@ -916,7 +948,7 @@ function stripHtml(c, month, plans) {
       + (i === 1 && w1 > 0 ? '\\n5m ' + fmtTokens(c[1] - w1) + ' \\u00b7 1h ' + fmtTokens(w1) + ' (' + fmtUsd(c[12]) + ')' : '');
     return '<span class="it" title="' + esc(title) + '"><i class="sw t' + i + '"></i>' + TYPE_NAMES[i] + ' <b>' + fmtUsd(c[4 + i]) + '</b></span>';
   }).join('');
-  return '<span class="it" title="' + esc(breakdownLines([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]]).join('\\n')) + '"><span class="k">API</span><span class="big">' + fmtUsd(tu) + '</span></span>'
+  return '<span class="it" data-tok="' + tt + '" data-usd="' + tu + '" title="' + esc(breakdownLines([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]]).join('\\n')) + '"><span class="k">API</span><span class="big">' + fmtUsd(tu) + '</span></span>'
     + '<span class="parts">' + parts + '</span>'
     + '<span class="it"><span class="k">tok</span>' + fmtTokens(tt) + '</span>'
     + '<span class="it" title="Cache read tokens per cache write token; hit = share of the prompt read from cache"><span class="k">cache r/w</span>' + fmtRatio(cacheRatio(c)) + ' <span class="muted">' + hitRate(c) + '</span></span>'
@@ -1015,6 +1047,28 @@ function capacityChart(u, pd, sel, size) {
   };
 }
 
+// The overview series: per hour while the history is under three days old
+// (a few days of bars would say nothing), per day, per week past 60 days.
+function overviewSeries(u, accs, pd, daily) {
+  var hours = u.hours || [];
+  if (uDays === 0 && u.firstAt && hours.length && u.firstAt >= hours[0]) {
+    var start = 0;
+    var h0 = Math.floor(u.firstAt / 3600000) * 3600000;
+    for (var i = 0; i < hours.length; i++) if (hours[i] <= h0) start = i;
+    start = Math.min(start, Math.max(0, hours.length - 24));
+    var rows = {};
+    accs.forEach(function (a) { rows[a.id] = (u.hourly[a.id] || hours.map(blankCell)).slice(start); });
+    return { labels: hours.slice(start), rows: rows, unit: 'hour',
+      label: function (at) { return pad2(new Date(at).getHours()) + 'h'; },
+      head: function (at) { return fmtWhen(at) + ' (1h)'; } };
+  }
+  var gr = grouped(pd.days, daily);
+  gr.unit = gr.weekly ? 'week' : 'day';
+  gr.label = function (d) { return fmtDay(d); };
+  gr.head = function (d) { return (gr.weekly ? 'Week of ' : '') + fmtDay(d); };
+  return gr;
+}
+
 function renderUsage() {
   var u = usage;
   if (!u) return;
@@ -1060,12 +1114,12 @@ function renderUsage() {
   var html = '';
   var legend = '';
   if (uView === 'overview' || uView === 'byseat') {
-    var gr = grouped(pd.days, daily);
+    var gr = overviewSeries(u, accs, pd, daily);
     accs.forEach(function (a) { gr.rows[a.id].forEach(function (c) { addCell(sum, c); }); });
     if (uView === 'overview') {
       var ocols = gr.labels.map(function (d, i) {
         var segs = [];
-        var lines = [(gr.weekly ? 'Week of ' : '') + fmtDay(d)];
+        var lines = [gr.head(d)];
         var tot = blankCell();
         accs.forEach(function (a) {
           var c = gr.rows[a.id][i];
@@ -1073,9 +1127,9 @@ function renderUsage() {
           segs.push({ v: total(c), cls: accClass(a.id) });
           if (tokOf(c) > 0) lines.push(a.label + ': ' + fmtTokens(tokOf(c)) + ' tok \\u00b7 ' + fmtUsd(usdOf(c)));
         });
-        return { label: fmtDay(d), title: cellLines(lines.join('\\n'), tot), segs: segs };
+        return { label: gr.label(d), title: cellLines(lines.join('\\n'), tot), segs: segs, raw: [tokOf(tot), usdOf(tot)] };
       });
-      html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + (gr.weekly ? 'week' : 'day') + ' by seat' });
+      html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + gr.unit + ' by seat' });
       legend = accs.map(function (a) { return '<span><i class="sw ' + accClass(a.id) + '"></i>' + esc(a.label) + '</span>'; }).join('');
     } else {
       // One small chart per seat, all on the same scale. A click opens that seat in Daily.
@@ -1088,10 +1142,10 @@ function renderUsage() {
         var cls = accClass(a.id);
         var cols = gr.labels.map(function (d, i) {
           var c = gr.rows[a.id][i];
-          return { label: '', title: cellLines(a.label + ' \\u00b7 ' + (gr.weekly ? 'week of ' : '') + fmtDay(d), c), segs: [{ v: total(c), cls: cls }] };
+          return { label: '', title: cellLines(a.label + ' \\u00b7 ' + gr.head(d), c), segs: [{ v: total(c), cls: cls }] };
         });
         var plan = u.plans ? u.plans[a.id] : null;
-        return '<button class="mult" data-act="usel" data-id="' + esc(a.id) + '" title="' + esc(cellLines(a.label + (plan ? ' (' + plan.label + ', $' + plan.monthlyUsd + '/month)' : ''), t)) + '">'
+        return '<button class="mult" data-act="usel" data-id="' + esc(a.id) + '" data-tok="' + tokOf(t) + '" data-usd="' + usdOf(t) + '" title="' + esc(cellLines(a.label + (plan ? ' (' + plan.label + ', $' + plan.monthlyUsd + '/month)' : ''), t)) + '">'
           + '<div class="mh"><i class="sw ' + cls + '"></i><b>' + esc(a.label) + '</b><span class="num muted">' + pct(total(t), allTotal) + '</span></div>'
           + barChart(cols, { w: 150, h: mh, max: shared, axis: false, label: a.label })
           + '<div class="mf"><span>' + fmtUsd(usdOf(t)) + '</span><span>' + fmtTokens(tokOf(t)) + '</span><span>r/w ' + fmtRatio(cacheRatio(t)) + '</span></div>'
@@ -1109,14 +1163,14 @@ function renderUsage() {
     var hcols = hrows.slice(from).map(function (c, j) {
       var at = u.hours[from + j];
       addCell(sum, c);
-      return { label: pad2(new Date(at).getHours()) + 'h', title: cellLines(fmtWhen(at) + ' (1h) \\u00b7 ' + name, c), segs: typeSegs(c) };
+      return { label: pad2(new Date(at).getHours()) + 'h', title: cellLines(fmtWhen(at) + ' (1h) \\u00b7 ' + name, c), segs: typeSegs(c), raw: [tokOf(c), usdOf(c)] };
     });
     html = barChart(hcols, { w: size.w, h: size.h, label: 'Usage per hour' });
   } else {
     var drows = pd.cut(rowsOf(u.daily, sel, u.days.length) || []);
     var dcols = drows.map(function (c, i) {
       addCell(sum, c);
-      return { label: fmtDay(pd.days[i]), title: cellLines(fmtDay(pd.days[i]) + ' \\u00b7 ' + name, c), segs: typeSegs(c) };
+      return { label: fmtDay(pd.days[i]), title: cellLines(fmtDay(pd.days[i]) + ' \\u00b7 ' + name, c), segs: typeSegs(c), raw: [tokOf(c), usdOf(c)] };
     });
     if (uView === 'daily') html = barChart(dcols, { w: size.w, h: size.h, label: 'Usage per day' });
     else html = costView(sum);
