@@ -366,6 +366,28 @@ const plugin: AlfredPlugin = {
       }),
     );
 
+    // Seat order (fill takes the first usable seat in it). `index` moves to a
+    // position (0 = first), `delta` moves by that many places, `ids` sets the
+    // whole order. Applied to the next pick, no reload.
+    ctx.registerAction(
+      'moveAccount',
+      safe((args) => {
+        const id = requireId(args);
+        const a = args as { index?: unknown; delta?: unknown };
+        const order = typeof a.index === 'number' ? pool.moveTo(id, a.index) : pool.move(id, Number(a.delta ?? 0));
+        return { order: order.map((x) => x.id) };
+      }),
+    );
+
+    ctx.registerAction(
+      'reorderAccounts',
+      safe((args) => {
+        const ids = (args as { ids?: unknown } | undefined)?.ids;
+        if (!Array.isArray(ids)) throw new Error('ids must be an array of account ids.');
+        return { order: pool.reorder(ids.map(String)).map((x) => x.id) };
+      }),
+    );
+
     // Seat availability by hand: `clearExhausted` puts a seat back in rotation
     // before its recorded reset (the user knows the window rolled over, or
     // the limit was raised); `markExhausted` takes one out for a while — also

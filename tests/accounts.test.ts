@@ -111,6 +111,45 @@ describe('selection', () => {
     assert.equal(pool.pick({ model: 'opus' }).account?.id, a.id, 'all over: least used');
   });
 
+  it('seat order: first usable seat in the order, next one when exhausted or disabled', () => {
+    const pool = makePool(3);
+    const [a, b, c] = pool.list();
+    const pick = () => pool.pick({ model: 'opus' }).account?.id;
+    assert.equal(pick(), a.id);
+    pool.move(c.id, -2);
+    assert.deepEqual(pool.list().map((x) => x.id), [c.id, a.id, b.id], 'reorder applies at once');
+    assert.equal(pick(), c.id);
+    pool.markExhausted(c.id, Date.now() + 3_600_000, 'limit');
+    assert.equal(pick(), a.id, 'exhausted: the next in order');
+    pool.update(a.id, { enabled: false });
+    assert.equal(pick(), b.id, 'disabled: the next again');
+    pool.clearExhausted(c.id);
+    assert.equal(pick(), c.id, 'back in rotation at its place');
+    pool.reorder([b.id, c.id]);
+    assert.deepEqual(pool.list().map((x) => x.id), [b.id, c.id, a.id], 'unnamed seats keep their place after');
+    pool.moveTo(a.id, 0);
+    assert.equal(pool.list()[0].id, a.id);
+    pool.setPreferred(c.id);
+    assert.equal(pool.list()[0].id, c.id, 'prefer = move to position 1');
+    pool.move(c.id, -5);
+    assert.equal(pool.list()[0].id, c.id, 'clamped');
+    const d = pool.add('Seat 4', 'token');
+    assert.equal(pool.list().at(-1)!.id, d.id, 'a new seat goes last');
+    assert.throws(() => pool.reorder(['nope']), /Unknown account/);
+    assert.throws(() => pool.reorder([a.id, a.id]), /Duplicate/);
+  });
+
+  it('seat order survives a reload of the pool', () => {
+    const dataDir = mkdtempSync(join(dir, 'p-'));
+    const first = new AccountPool({ dataDir, logger });
+    const x = first.add('X', 'token');
+    const y = first.add('Y', 'token');
+    first.moveTo(y.id, 0);
+    first.flush();
+    const again = new AccountPool({ dataDir, logger });
+    assert.deepEqual(again.list().map((a) => a.id).filter((id) => id === x.id || id === y.id), [y.id, x.id]);
+  });
+
   it('spread: least utilised first', () => {
     const pool = makePool(3);
     pool.updateSettings({ strategy: 'spread' });

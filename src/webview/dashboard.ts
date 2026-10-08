@@ -96,6 +96,9 @@ label.in { display: flex; gap: 4px; align-items: center; font-size: 11px; color:
 .meter + .meter { margin-top: 2px; }
 .meter .p { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
 .meter .w { min-width: 34px; }
+td.ord { width: 1%; padding-right: 0; }
+.pos { display: inline-block; min-width: 14px; font-variant-numeric: tabular-nums; color: var(--muted); }
+button.mv { padding: 0 4px; font-size: 9px; line-height: 14px; margin-left: 2px; }
 [hidden] { display: none !important; }
 `;
 
@@ -360,7 +363,11 @@ function accountRows(s) {
   var byEmail = {};
   s.accounts.forEach(function (a) { if (a.email) (byEmail[a.email] = byEmail[a.email] || []).push(a.label); });
   var rows = [];
-  s.accounts.forEach(function (a) {
+  var last = s.accounts.length - 1;
+  var orderTitle = s.settings.strategy === 'fill'
+    ? 'Order of use: the first usable seat serves, the next one takes over when it is exhausted or disabled'
+    : 'Order of use (spread balances by usage; order only breaks ties)';
+  s.accounts.forEach(function (a, i) {
     var u = a.usage || { windows: [] };
     var five = u.windows.filter(function (w) { return w.key === 'five_hour'; })[0];
     var week = u.windows.filter(function (w) { return w.key === 'seven_day'; })[0];
@@ -368,8 +375,7 @@ function accountRows(s) {
     var weekCell = meter(week, scoped.length ? 'all' : '', s.settings.threshold, 'date')
       + scoped.map(function (w) { return meter(w, w.model, s.settings.threshold, 'date'); }).join('');
     var twins = (byEmail[a.email] || []).filter(function (l) { return l !== a.label; });
-    var tags = (a.preferred ? ' <span class="tag info" title="First in rotation">preferred</span>' : '')
-      + (a.subscriptionType ? ' <span class="tag">' + esc(a.subscriptionType) + '</span>' : '')
+    var tags = (a.subscriptionType ? ' <span class="tag">' + esc(a.subscriptionType) + '</span>' : '')
       + (a.auth === 'token' ? ' <span class="tag">token</span>' : '')
       + (a.exposeModels ? ' <span class="tag" title="model@seat variants are listed in the model picker">pinned</span>' : '')
       + (twins.length ? ' <span class="tag warn" title="Same Claude login as ' + esc(twins.join(', ')) + '">same login as ' + esc(twins.join(', ')) + '</span>' : '');
@@ -377,6 +383,9 @@ function accountRows(s) {
     var bz = function (act) { return busy[act + ':' + a.id] ? ' disabled' : ''; };
     var needsLogin = a.status === 'logged out' || a.status === 'auth failed';
     var html = '<tr class="' + (a.status === 'active' ? 'cur' : '') + (a.enabled ? '' : ' off') + '">'
+      + '<td class="ord"><div class="nowrap" title="' + orderTitle + '"><span class="pos">' + (i + 1) + '</span>'
+      + '<button class="mv" data-act="up" data-id="' + esc(a.id) + '"' + (i === 0 || bz('order') ? ' disabled' : '') + ' title="Move up">▲</button>'
+      + '<button class="mv" data-act="down" data-id="' + esc(a.id) + '"' + (i === last || bz('order') ? ' disabled' : '') + ' title="Move down">▼</button></div></td>'
       + '<td><div class="nowrap"><b>' + esc(a.label) + '</b>' + tags + '</div>'
       + '<div class="muted small ell s" title="' + esc((a.email || a.id) + (a.orgName ? ' \\u00b7 ' + a.orgName : '')) + '">' + esc(a.email || a.id) + '</div></td>'
       + '<td class="nowrap"><span class="pill ' + (STATUS_PILL[a.status] || 'idle') + '" title="' + esc(a.statusDetail || '') + '">' + esc(a.status) + '</span>'
@@ -396,12 +405,12 @@ function accountRows(s) {
     rows.push({ key: 'acc:' + a.id, html: html });
     if (openDetails[a.id]) {
       var err = a.lastError ? '<span class="muted small" title="' + esc(a.lastError.message) + '">' + esc(fmtClock(a.lastError.at) + ' ' + a.lastError.message) + '</span>' : '';
-      rows.push({ key: 'det:' + a.id, html: '<tr class="det"><td colspan="6"><div class="toolbar" style="margin:0">'
+      rows.push({ key: 'det:' + a.id, html: '<tr class="det"><td colspan="7"><div class="toolbar" style="margin:0">'
         + '<input type="password" class="field" style="flex:1;min-width:180px" placeholder="claude setup-token (empty = use login)" id="tokv-' + esc(a.id) + '">'
         + '<button data-act="savetoken" data-id="' + esc(a.id) + '"' + bz('savetoken') + '>Save token</button>'
         + (needsLogin ? '' : '<button data-act="login" data-id="' + esc(a.id) + '"' + bz('login') + '>Log in again</button>')
         + '<button data-act="toggle" data-id="' + esc(a.id) + '"' + bz('toggle') + '>' + (a.enabled ? 'Disable' : 'Enable') + '</button>'
-        + (a.preferred ? '' : '<button data-act="prefer" data-id="' + esc(a.id) + '"' + bz('prefer') + '>Prefer</button>')
+        + (i === 0 ? '' : '<button data-act="top" data-id="' + esc(a.id) + '"' + bz('order') + '>Move to top</button>')
         + '<button data-act="pin" data-id="' + esc(a.id) + '"' + bz('pin') + '>' + (a.exposeModels ? 'Unpin models' : 'Pin models') + '</button>'
         + (a.exhaustedUntil ? '<button data-act="clear" data-id="' + esc(a.id) + '"' + bz('clear') + ' title="Put the seat back in rotation now">Clear limit</button>' : '')
         + armBtn('remove', a.id, 'Remove', 'Confirm remove')
@@ -528,7 +537,10 @@ function onAct(b) {
   if (act === 'refresh') return run('refresh:' + id, 'refreshUsage', { id: id });
   if (act === 'test') return run('test:' + id, 'testConnection', { accountId: id }, function (r) { return labelOf(id) + ' answered: ' + r.sample; });
   if (act === 'toggle') return run('toggle:' + id, 'updateAccount', { id: id, enabled: !(a && a.enabled) });
-  if (act === 'prefer') return run('prefer:' + id, 'setPreferred', { id: id });
+  if (act === 'up' || act === 'down' || act === 'top') {
+    var args = act === 'top' ? { id: id, index: 0 } : { id: id, delta: act === 'up' ? -1 : 1 };
+    return run('order:' + id, 'moveAccount', args);
+  }
   if (act === 'pin') return run('pin:' + id, 'updateAccount', { id: id, exposeModels: !(a && a.exposeModels) });
   if (act === 'clear') return run('clear:' + id, 'clearExhausted', { id: id });
   if (act === 'savetoken') {
@@ -624,7 +636,7 @@ export function renderDashboard(): string {
 <h2>Seats</h2>
 <div class="wrap scroll">
   <table>
-    <thead><tr><th>Seat</th><th>Status</th><th>5h</th><th>Week</th><th>Tokens 5h</th><th></th></tr></thead>
+    <thead><tr><th title="Order of use">#</th><th>Seat</th><th>Status</th><th>5h</th><th>Week</th><th>Tokens 5h</th><th></th></tr></thead>
     <tbody id="acc"></tbody>
   </table>
 </div>

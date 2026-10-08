@@ -398,7 +398,12 @@ describe('Claude panel page', () => {
     assert.equal(page.$('tokv-b')!.value, '');
     await expect(btn(page, 'login', 'b'), 'loginAccount', { id: 'b' });
     await expect(btn(page, 'toggle', 'b'), 'updateAccount', { id: 'b', enabled: false });
-    await expect(btn(page, 'prefer', 'b'), 'setPreferred', { id: 'b' });
+    await expect(btn(page, 'top', 'b'), 'moveAccount', { id: 'b', index: 0 });
+    await expect(btn(page, 'up', 'b'), 'moveAccount', { id: 'b', delta: -1 });
+    await expect(btn(page, 'down', 'b'), 'moveAccount', { id: 'b', delta: 1 });
+    assert.ok(btn(page, 'up', 'a')!.disabled, 'the first seat cannot go up');
+    assert.ok(btn(page, 'down', 'c')!.disabled, 'the last seat cannot go down');
+    assert.equal(btn(page, 'top', 'a'), null);
     await expect(btn(page, 'pin', 'b'), 'updateAccount', { id: 'b', exposeModels: true });
     await expect(btn(page, 'clear', 'b'), 'clearExhausted', { id: 'b' });
 

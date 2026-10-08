@@ -338,13 +338,45 @@ export class AccountPool {
     return a;
   }
 
+  /**
+   * The seat order is the one concept the user sets: `fill` takes the first
+   * usable seat in it and moves down the list when a seat is exhausted,
+   * disabled or over the threshold. "Preferred" is simply position 1.
+   */
   setPreferred(id: string): void {
+    this.moveTo(id, 0);
+  }
+
+  /** Moves a seat to `index` (0 = first), clamped; the others keep their relative order. */
+  moveTo(id: string, index: number): Account[] {
     const target = this.require(id);
-    const ordered = this.list().filter((a) => a.id !== target.id);
-    [target, ...ordered].forEach((a, i) => {
+    const rest = this.list().filter((a) => a.id !== target.id);
+    const at = Math.max(0, Math.min(rest.length, Math.round(Number.isFinite(index) ? index : 0)));
+    rest.splice(at, 0, target);
+    return this.applyOrder(rest);
+  }
+
+  /** Moves a seat `delta` places (negative = up). */
+  move(id: string, delta: number): Account[] {
+    const i = this.list().findIndex((a) => a.id === id);
+    if (i < 0) this.require(id);
+    return this.moveTo(id, i + Math.round(delta));
+  }
+
+  /** Full order by id. Unknown ids are refused; seats not named keep their place after the named ones. */
+  reorder(ids: string[]): Account[] {
+    const named = ids.map((id) => this.require(id));
+    if (new Set(named.map((a) => a.id)).size !== named.length) throw new Error('Duplicate account in the order.');
+    const rest = this.list().filter((a) => !named.includes(a));
+    return this.applyOrder([...named, ...rest]);
+  }
+
+  private applyOrder(order: Account[]): Account[] {
+    order.forEach((a, i) => {
       a.priority = i;
     });
     this.save();
+    return order;
   }
 
   /** Remove a seat. Its private config dir (credentials included) goes with it. */
@@ -568,7 +600,7 @@ export class AccountPool {
   /**
    * Choose the seat for one request.
    *
-   * - `fill`: highest-priority seat under the threshold on every window that
+   * - `fill`: first seat in the user's order under the threshold on every window that
    *   constrains this model; if none, the one with the most headroom (ties:
    *   earliest reset).
    * - `spread`: least-utilised first (ties: fewer in-flight, then priority).
