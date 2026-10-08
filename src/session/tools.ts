@@ -45,7 +45,7 @@ export async function resolveCwd(
     if (!isAbsolute(cwd)) return { code: 'invalid_args', error: `cwd must be an absolute path, got "${cwd}". Or pass project instead.` };
     const abs = resolve(cwd);
     if (!isDir(abs)) return { code: 'not_found', error: `cwd "${abs}" is not an existing directory.` };
-    return { cwd: abs };
+    return checkCwdAccess(abs, input);
   }
   const project = str(args.project);
   if (!project) return { code: 'invalid_args', error: 'Pass either cwd (absolute directory) or project.' };
@@ -53,7 +53,7 @@ export async function resolveCwd(
   const mount = input.resolver?.getMount?.(project);
   if (mount) {
     if (mount.readonly) return { code: 'refused', error: `Mount "${project}" is read-only; a Claude Code session would edit it.` };
-    if (isDir(mount.absPath)) return { cwd: mount.absPath };
+    if (isDir(mount.absPath)) return checkCwdAccess(mount.absPath, input);
   }
   let list: Array<{ id: string; name: string; workspacePath: string | null }> = [];
   try {
@@ -66,7 +66,7 @@ export async function resolveCwd(
   if (match) {
     if (!match.workspacePath) return { code: 'not_found', error: `Project "${match.name}" has no workspace path.` };
     if (!isDir(match.workspacePath)) return { code: 'not_found', error: `Workspace of project "${match.name}" (${match.workspacePath}) does not exist.` };
-    return { cwd: match.workspacePath };
+    return checkCwdAccess(match.workspacePath, input);
   }
   const known = [
     ...(input.resolver?.listMounts?.() ?? []).map((m) => m.name),
@@ -76,6 +76,26 @@ export async function resolveCwd(
     code: 'not_found',
     error: `Unknown project "${project}".${known.length ? ` Known: ${[...new Set(known)].join(', ')}.` : ''} Or pass an absolute cwd.`,
   };
+}
+
+/**
+ * A session edits files and runs commands under its cwd, so the cwd must be a
+ * WRITABLE place the calling agent can reach: inside one of its mounts, not
+ * read-only, no junction/symlink escape. The resolver's own write check does
+ * all three (same rules as the file tools).
+ */
+export function checkCwdAccess(abs: string, input: Pick<ToolInput, 'resolver'>): CwdResult {
+  const resolver = input.resolver;
+  if (!resolver?.resolveForWrite) {
+    return { code: 'refused', error: 'No workspace mounts are available to this agent; a Claude Code session cannot run.' };
+  }
+  try {
+    // An OS-absolute path is routed to the mount that contains it.
+    resolver.resolveForWrite(undefined, abs);
+    return { cwd: resolve(abs) };
+  } catch (err) {
+    return { code: 'refused', error: `cwd "${abs}": ${(err as Error).message}` };
+  }
 }
 
 function resultMeta(run: RunState, runner: SessionRunner): Record<string, unknown> {
@@ -151,13 +171,22 @@ export function registerSessionTools(ctx: PluginContext, runner: SessionRunner):
       const maxTurns = Number.isFinite(turnsArg) && turnsArg > 0 ? Math.min(1000, Math.round(turnsArg)) : cfg.maxTurns;
       const model = splitModel(str(args.model) || cfg.model).model;
 
+      const sessionId = str(args.sessionId) || undefined;
+      // A resume runs in the session's recorded cwd (runner.start): that is
+      // the directory the session will touch, so it gets the access check.
+      const recorded = sessionId ? runner.recordedCwd(sessionId) : undefined;
+      if (recorded) {
+        const access = checkCwdAccess(recorded, input);
+        if (access.error !== undefined) return fail(access.code, access.error);
+      }
+
       const started = runner.start({
         cwd: where.cwd,
         prompt,
         model,
         effort: effort || undefined,
         permissionMode: mode,
-        sessionId: str(args.sessionId) || undefined,
+        sessionId,
         maxTurns,
         agent: input.agentId,
       });

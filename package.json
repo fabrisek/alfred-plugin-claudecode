@@ -1,19 +1,19 @@
 {
   "name": "@alfred-plugin/claude-code",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/session.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/session.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
     "@alfred/provider-openai-compat": "*",
     "@alfred/sdk": "*",
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.294"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -25,7 +25,7 @@
     "description": "Use one or several Claude.ai subscription seats as an Alfred LLM provider — no API key, no per-token billing. Drives Claude Code headlessly via the official Agent SDK, switches seats automatically on usage limits, shows per-seat usage on the Claude accounts page, and lets agents delegate coding tasks to full Claude Code sessions (claude_code_run).",
     "main": "src/index.ts",
     "engine": {
-      "protocolVersion": ">=1.6.0"
+      "protocolVersion": ">=1.8.0"
     },
     "contributes": {
       "providers": [
@@ -60,6 +60,44 @@
       ]
     },
     "configSchema": {
+      "chatMode": {
+        "type": "string",
+        "label": "Chat mode",
+        "description": "cli = a conversation on this provider runs in Claude Code's own agent loop (native tools, sub-agents, compaction, a persistent session per conversation), with Alfred's persona appended and Alfred's tools over MCP. completion = the older text-only path where Alfred runs the tool loop. Needs a plugin reload.",
+        "default": "cli",
+        "enum": ["cli", "completion"],
+        "group": "Chat"
+      },
+      "chatPermissionMode": {
+        "type": "string",
+        "label": "Default permission mode",
+        "description": "Permission mode of a conversation that has not chosen one. bypassPermissions = no checks (Alfred adds no rules); auto = Claude's classifier decides; acceptEdits = file edits allowed, anything else needing approval is refused; plan = read-only.",
+        "default": "bypassPermissions",
+        "enum": ["plan", "acceptEdits", "auto", "bypassPermissions"],
+        "group": "Chat"
+      },
+      "chatPermissionModeMax": {
+        "type": "string",
+        "label": "Permission mode ceiling",
+        "description": "Most permissive mode any conversation may run in.",
+        "default": "bypassPermissions",
+        "enum": ["plan", "acceptEdits", "auto", "bypassPermissions"],
+        "group": "Chat"
+      },
+      "autoSwitchMidTurn": {
+        "type": "boolean",
+        "label": "Switch seat mid-turn",
+        "description": "When a seat hits its usage limit in the middle of a turn, continue the same session on the next seat instead of stopping.",
+        "default": true,
+        "group": "Chat"
+      },
+      "sharedSessionStore": {
+        "type": "boolean",
+        "label": "Share sessions across seats",
+        "description": "Link every seat's projects/, file-history/, tasks/ and todos/ to the default login's (~/.claude) with directory junctions, so any seat can resume any session (and terminal sessions become resumable). Existing seat dirs are backed up and merged first. Needs a plugin reload.",
+        "default": true,
+        "group": "Chat"
+      },
       "oauthToken": {
         "type": "string",
         "label": "Setup token for the default account (legacy, optional)",

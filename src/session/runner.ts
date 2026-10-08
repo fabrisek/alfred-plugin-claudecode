@@ -12,12 +12,12 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Logger } from '@alfred/sdk';
-import type { Account, AccountPool, TokenSample } from '../accounts/pool.js';
+import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from '../accounts/pool.js';
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery } from '../ClaudeCodeProvider.js';
 import { ChangeTracker, describeCall, type RunReport, type RunStatus } from './summary.js';
-import { seatForResume, type SessionIndex } from './sessions.js';
+import { seatForResume, sessionCwd, type SessionIndex } from './sessions.js';
 
 export type SessionPermissionMode = 'plan' | 'acceptEdits' | 'bypassPermissions';
 
@@ -169,6 +169,14 @@ export class SessionRunner {
       const seat = seatForResume(pool, this.opts.sessions, request.sessionId, this.now());
       if (!seat.account) return { code: seat.code, error: seat.error, resetsAt: seat.resetsAt };
       first = seat.account;
+      // The CLI finds a session only under the exact cwd it was created in
+      // (drive-letter case included): a resume runs there, whatever the
+      // caller resolved its cwd/project to.
+      const recorded = sessionCwd(pool, this.opts.sessions, request.sessionId);
+      if (recorded && recorded !== request.cwd) {
+        this.opts.logger.info('session resume uses its recorded cwd', { sessionId: request.sessionId, requested: request.cwd, recorded });
+        request = { ...request, cwd: recorded };
+      }
     } else {
       const pick = pool.pick({ model: request.model });
       if (!pick.account) return { code: 'unavailable', error: pick.reason };
@@ -190,6 +198,11 @@ export class SessionRunner {
     run.done = this.execute(run, first);
     this.runs.set(run.id, run);
     return { run };
+  }
+
+  /** Exact cwd an existing session was created in (index, then transcript). */
+  recordedCwd(sessionId: string): string | undefined {
+    return sessionCwd(this.opts.pool, this.opts.sessions, sessionId);
   }
 
   get(id: string): RunState | undefined {
@@ -470,10 +483,12 @@ export class SessionRunner {
         if (c.kind === 'limit') {
           resetsAt = c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? this.now() + 30 * 60_000;
           pool.markExhausted(account.id, resetsAt, detail.slice(0, 200));
+        } else if (c.kind === 'throttle') {
+          pool.backoff(account.id, THROTTLE_BACKOFF_MS, `throttled: ${detail.slice(0, 180)}`);
         } else if (c.kind === 'auth') {
           pool.markAuthFailed(account.id, detail.slice(0, 200));
         }
-        const seatLevel = c.kind === 'limit' || c.kind === 'auth';
+        const seatLevel = c.kind === 'limit' || c.kind === 'throttle' || c.kind === 'auth';
         outcome = {
           status: 'error',
           resultText: finalText,

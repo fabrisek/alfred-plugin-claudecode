@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from '@alfred/sdk';
+import { unlinkSharedDirs } from './sharedSessions.js';
 import {
   applyRateLimitInfo,
   blockingReset,
@@ -61,6 +62,12 @@ export type PoolSettings = {
   threshold: number;
   /** Background usage poll interval, minutes. */
   usagePollMinutes: number;
+  /**
+   * `fill` only: requests one seat may serve at once before the next seat
+   * under the threshold takes the overflow (a fan-out must not land on one
+   * seat). 0 = no cap.
+   */
+  fillMaxInFlight: number;
 };
 
 /** Token counts as the CLI reports them in each turn's `result.usage`. */
@@ -116,7 +123,10 @@ type StateFile = {
 
 type SecretsFile = { tokens: Record<string, string> };
 
-export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'fill', threshold: 90, usagePollMinutes: 5 };
+export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'fill', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 };
+
+/** How long a seat sits out after a bare 429 (no quota rejection, no reset time). */
+export const THROTTLE_BACKOFF_MS = 20_000;
 const RECENT_MAX = 50;
 const HOUR_MS = 3_600_000;
 const LEDGER_KEEP_MS = 8 * 24 * HOUR_MS;
@@ -260,6 +270,9 @@ export class AccountPool {
     if (typeof patch.usagePollMinutes === 'number' && Number.isFinite(patch.usagePollMinutes)) {
       s.usagePollMinutes = Math.min(120, Math.max(1, Math.round(patch.usagePollMinutes)));
     }
+    if (typeof patch.fillMaxInFlight === 'number' && Number.isFinite(patch.fillMaxInFlight)) {
+      s.fillMaxInFlight = Math.min(64, Math.max(0, Math.round(patch.fillMaxInFlight)));
+    }
     this.save();
     return s;
   }
@@ -346,6 +359,8 @@ export class AccountPool {
     }
     const accountsRoot = join(this.opts.dataDir, 'accounts');
     if (a.configDir && a.configDir.startsWith(accountsRoot)) {
+      // Its projects/ etc. may be junctions to the shared session store.
+      unlinkSharedDirs(a.configDir);
       rmSync(a.configDir, { recursive: true, force: true });
     }
     this.save();
@@ -428,6 +443,20 @@ export class AccountPool {
   markExhausted(id: string, until: number, reason: string): void {
     const rt = this.runtime(id);
     rt.exhaustedUntil = Math.max(until, this.now() + 60_000);
+    rt.exhaustedReason = reason;
+    this.save();
+  }
+
+  /**
+   * Short time-out after a transient throttle (bare 429 / "too many
+   * requests" without a quota rejection): the seat is skipped for `ms`, not
+   * benched until a reset that was never announced.
+   */
+  backoff(id: string, ms: number, reason: string): void {
+    const rt = this.runtime(id);
+    const until = this.now() + ms;
+    if ((rt.exhaustedUntil ?? 0) >= until) return;
+    rt.exhaustedUntil = until;
     rt.exhaustedReason = reason;
     this.save();
   }
@@ -558,8 +587,16 @@ export class AccountPool {
       busy: this.inFlightOf(a.id),
     }));
     if (strategy === 'fill') {
-      const under = scored.find((s) => s.pct < threshold);
-      if (under) return { account: under.a };
+      const under = scored.filter((s) => s.pct < threshold);
+      if (under.length > 0) {
+        // Priority order, but a seat already serving `fillMaxInFlight`
+        // requests lets the next one take the overflow; when every seat under
+        // the threshold is that busy, the least busy one serves.
+        const cap = this.state.settings.fillMaxInFlight;
+        const free = cap > 0 ? under.find((s) => s.busy < cap) : under[0];
+        if (free) return { account: free.a };
+        return { account: [...under].sort((x, y) => x.busy - y.busy)[0].a };
+      }
     }
     scored.sort(
       (x, y) => x.pct - y.pct || x.reset - y.reset || x.busy - y.busy || x.a.priority - y.a.priority,

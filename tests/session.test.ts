@@ -2,13 +2,35 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { AccountPool } from '../src/accounts/pool.js';
 import { __setQueryForTests } from '../src/ClaudeCodeProvider.js';
 import { ChangeTracker, summarizeRun, type RunReport } from '../src/session/summary.js';
 import { SessionIndex, seatForResume } from '../src/session/sessions.js';
 import { DEFAULT_SESSION_TOOLS, SessionRunner, type SessionConfig } from '../src/session/runner.js';
-import { registerSessionTools } from '../src/session/tools.js';
+import { checkCwdAccess, registerSessionTools, resolveCwd } from '../src/session/tools.js';
+
+/**
+ * Minimal stand-in for the host's WorkspaceResolver: OS-absolute paths are
+ * routed to the mount containing them; read-only mounts refuse writes.
+ */
+function fakeResolver(mounts: Array<{ name: string; absPath: string; readonly?: boolean }>) {
+  const fold = (p: string) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p));
+  const list = mounts.map((m) => ({ ...m, readonly: m.readonly === true }));
+  return {
+    listMounts: () => list,
+    getMount: (n: string) => list.find((m) => m.name === n),
+    resolveForRead: () => {
+      throw new Error('unused');
+    },
+    resolveForWrite: (_mount: string | undefined, path: string) => {
+      const m = list.find((x) => fold(path) === fold(x.absPath) || fold(path).startsWith(fold(x.absPath) + sep));
+      if (!m) throw new Error(`refused: path "${path}" is outside every mount`);
+      if (m.readonly) throw new Error(`mount "/${m.name}/" is read-only`);
+      return { mount: m, absPath: resolve(path), relPath: relative(m.absPath, path) };
+    },
+  };
+}
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} } as never;
 let dir = '';
@@ -251,10 +273,58 @@ describe('claude_code_run tool', () => {
     const ctx = { registerTool: (t: { id: string }) => tools.set(t.id, t as never), projects: undefined } as never;
     const runner = new SessionRunner({ pool, cli: { path: '', native: false, source: 'bundled' }, sessions: new SessionIndex(join(dir, 'idx-7.json')), config: sessionCfg, logger });
     registerSessionTools(ctx, runner);
-    const res = await tools.get('claude_code_run')!.run({ args: { prompt: 'x', cwd: dir, permissionMode: 'bypassPermissions' }, agentId: 'a' });
+    const resolver = fakeResolver([{ name: 'workspace', absPath: dir }]);
+    const res = (await tools.get('claude_code_run')!.run({ args: { prompt: 'x', cwd: dir, permissionMode: 'bypassPermissions' }, agentId: 'a', resolver })) as {
+      ok: boolean;
+      error?: { code: string; message?: string };
+    };
     assert.equal(res.ok, false);
     assert.equal(res.error?.code, 'refused');
+    assert.match(res.error?.message ?? '', /exceeds the configured/);
     const rel = await tools.get('claude_code_run')!.run({ args: { prompt: 'x', cwd: 'relative/dir' }, agentId: 'a' });
     assert.equal(rel.error?.code, 'invalid_args');
+  });
+});
+
+describe('claude_code_run cwd access', () => {
+  it('an absolute cwd must be inside a writable mount of the agent', async () => {
+    const inside = mkdtempSync(join(dir, 'ws-'));
+    const ro = mkdtempSync(join(dir, 'ro-'));
+    const outside = mkdtempSync(join(dir, 'out-'));
+    const input = { resolver: fakeResolver([{ name: 'workspace', absPath: inside }, { name: 'docs', absPath: ro, readonly: true }]) } as never;
+    assert.equal((await resolveCwd({ cwd: inside }, input, undefined)).cwd, resolve(inside));
+    const out = await resolveCwd({ cwd: outside }, input, undefined);
+    assert.equal(out.cwd, undefined);
+    assert.equal(out.cwd === undefined && out.code, 'refused');
+    const readonly = await resolveCwd({ cwd: ro }, input, undefined);
+    assert.equal(readonly.cwd === undefined && readonly.code, 'refused');
+    assert.match(readonly.error ?? '', /read-only/);
+    // No resolver at all (out-of-band call): refused, never unchecked.
+    assert.equal(checkCwdAccess(inside, {} as never).error !== undefined, true);
+  });
+
+  it('a resume runs in the recorded session cwd (case-exact), and that cwd is access-checked', async () => {
+    const pool = makePool(1);
+    const index = new SessionIndex(join(dir, 'idx-8.json'));
+    const recorded = mkdtempSync(join(dir, 'Recorded-'));
+    index.record(SID, { accountId: 'seat-1', cwd: recorded, model: 'sonnet' });
+    const calls: Call[] = [];
+    __setQueryForTests(fakeQuery({ 'tok-1': [init(SID), success(SID, 'ok')] }, calls));
+    const runner = new SessionRunner({ pool, cli: { path: '', native: false, source: 'bundled' }, sessions: index, config: sessionCfg, logger });
+    const other = mkdtempSync(join(dir, 'other-'));
+    const started = runner.start({ cwd: other, prompt: 'continue', model: 'sonnet', permissionMode: 'acceptEdits', maxTurns: 0, sessionId: SID });
+    await started.run!.done;
+    assert.equal(calls[0].options.cwd, recorded);
+
+    const tools = new Map<string, { run: (i: unknown) => Promise<{ ok: boolean; error?: { code: string } }> }>();
+    registerSessionTools({ registerTool: (t: { id: string }) => tools.set(t.id, t as never), projects: undefined } as never, runner);
+    // The agent can reach `other` but not the session's recorded cwd.
+    const res = await tools.get('claude_code_run')!.run({
+      args: { prompt: 'x', cwd: other, sessionId: SID },
+      agentId: 'a',
+      resolver: fakeResolver([{ name: 'workspace', absPath: other }]),
+    });
+    assert.equal(res.error?.code, 'refused');
+    assert.equal(calls.length, 1, 'no CLI started');
   });
 });

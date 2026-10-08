@@ -144,6 +144,42 @@ describe('selection', () => {
     assert.match(r.reason!, /Seat 2/);
   });
 
+  it('fill: a busy seat lets the next seat under the threshold take the overflow', () => {
+    const pool = makePool(3);
+    const [a, b, c] = pool.list();
+    for (const x of [a, b, c]) pool.setUsage(x.id, usageAt(10));
+    const cap = pool.settings.fillMaxInFlight;
+    assert.ok(cap > 0);
+    for (let i = 0; i < cap; i++) {
+      const got = pool.pick({ model: 'opus' }).account!;
+      assert.equal(got.id, a.id);
+      pool.begin(got.id);
+    }
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id, 'overflow goes to the next seat');
+    for (let i = 0; i < cap; i++) pool.begin(b.id);
+    for (let i = 0; i < cap; i++) pool.begin(c.id);
+    pool.begin(a.id);
+    // Everyone at or over the cap: least busy under the threshold.
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
+    pool.updateSettings({ fillMaxInFlight: 0 });
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, a.id, '0 = no cap');
+  });
+
+  it('a throttle backs a seat off for seconds, not until an invented reset', () => {
+    let t = 1_000_000;
+    const pool = makePool(2, () => t);
+    const [a, b] = pool.list();
+    pool.backoff(a.id, 20_000, 'throttled');
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
+    assert.equal(pool.runtime(a.id).exhaustedUntil, t + 20_000);
+    t += 21_000;
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, a.id, 'back after the backoff');
+    // A backoff never shortens a real quota bench.
+    pool.markExhausted(a.id, t + 3_600_000, 'limit');
+    pool.backoff(a.id, 20_000, 'throttled');
+    assert.equal(pool.runtime(a.id).exhaustedUntil, t + 3_600_000);
+  });
+
   it('model ids carry an optional pinned seat', () => {
     assert.deepEqual(splitModel('opus@seat-3'), { model: 'opus', pinned: 'seat-3' });
     assert.deepEqual(splitModel('claude-opus-5'), { model: 'claude-opus-5' });
@@ -151,7 +187,13 @@ describe('selection', () => {
 
   it('classifies limit and auth failures', () => {
     assert.equal(classifyFailure("You've hit your limit · resets 6pm", undefined, null).kind, 'limit');
-    assert.equal(classifyFailure('x', 'rate_limit', null).kind, 'limit');
+    // A bare rate_limit / 429 without a quota rejection or reset is a
+    // throttle (seconds of backoff), not a spent quota.
+    assert.equal(classifyFailure('x', 'rate_limit', null).kind, 'throttle');
+    assert.equal(classifyFailure('API Error: 429 Too Many Requests', undefined, null).kind, 'throttle');
+    assert.equal(classifyFailure('x', 'rate_limit', 1791484800000).kind, 'limit', 'rejected window = quota');
+    assert.equal(classifyFailure('limit|1791484800', 'rate_limit', null).kind, 'limit', 'explicit reset = quota');
+    assert.equal(classifyFailure('x', 'authentication_failed', null).kind, 'auth');
     assert.equal(classifyFailure('Claude AI usage limit reached|1791484800', undefined, null).resetsAt, 1791484800000);
     assert.equal(classifyFailure('Invalid API key · Please run /login', undefined, null).kind, 'auth');
     assert.equal(classifyFailure('prompt is too long', undefined, null).kind, 'other');
@@ -292,6 +334,56 @@ describe('provider failover', () => {
       effort: 'high',
     });
     assert.equal((seen.content?.[1] as { type: string }).type, 'image');
+    __setQueryForTests(null);
+  });
+
+  it('re-emits every parallel native tool call of one API message, and records its usage', async () => {
+    const pool = makePool(1);
+    // As captured (tests/fixtures/claude-stream/parallel.jsonl): one SDK
+    // assistant message per tool_use block, same message id, then the
+    // message's usage and stop. The CLI is stopped there: no result.
+    const use = (id: string, path: string) => ({
+      type: 'assistant',
+      message: { id: 'msg_1', model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name: 'read_file', input: { path } }] },
+    });
+    const stop = [
+      { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { input_tokens: 11, output_tokens: 22, cache_read_input_tokens: 33, cache_creation_input_tokens: 4 } } },
+      { type: 'stream_event', event: { type: 'message_stop' } },
+      { type: 'result', subtype: 'error_max_turns', is_error: true, result: '' },
+    ];
+    __setQueryForTests(fakeRun({ 'tok-1': [use('t1', 'x.txt'), use('t2', 'y.txt'), ...stop] }, []));
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger });
+    const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
+    const calls = [...res.content.matchAll(/<tool_call>\n(.*)\n<\/tool_call>/g)].map((m) => JSON.parse(m[1]).arguments.path);
+    assert.deepEqual(calls, ['x.txt', 'y.txt']);
+    assert.equal(pool.recent[0].outcome, 'ok');
+    assert.deepEqual(pool.recent[0].tokens, { input: 11, output: 22, cacheRead: 33, cacheWrite: 4, costUsd: 0 });
+    __setQueryForTests(null);
+  });
+
+  it('a bare 429 backs the seat off for seconds and retries on the next seat', async () => {
+    const pool = makePool(2);
+    const calls: string[] = [];
+    __setQueryForTests(fakeRun({ 'tok-1': [{ __throw: 'API Error: 429 Too Many Requests' }], 'tok-2': [textDelta('hi'), okResult] }, calls));
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger });
+    const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(res.content, 'hi');
+    assert.deepEqual(calls, ['tok-1', 'tok-2']);
+    const until = pool.runtime(pool.list()[0].id).exhaustedUntil!;
+    assert.ok(until > Date.now() && until <= Date.now() + 60_000, 'short backoff, not a 30 min bench');
+    __setQueryForTests(null);
+  });
+
+  it('probeSeat answers from exactly the seat it was given', async () => {
+    const pool = makePool(2);
+    const calls: string[] = [];
+    __setQueryForTests(fakeRun({ 'tok-1': limitTurn, 'tok-2': [textDelta('OK'), okResult] }, calls));
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger });
+    const [a, b] = pool.list();
+    await assert.rejects(p.probeSeat(a, 'opus'));
+    assert.deepEqual(calls, ['tok-1'], 'no fallback to another seat');
+    const ok = await p.probeSeat(b, 'opus');
+    assert.deepEqual(ok, { text: 'OK', accountId: b.id });
     __setQueryForTests(null);
   });
 

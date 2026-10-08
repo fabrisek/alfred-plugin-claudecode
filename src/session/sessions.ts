@@ -8,7 +8,7 @@
  * terminal, say) is found by looking for its transcript in each seat's dir.
  */
 
-import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Account, AccountPool } from '../accounts/pool.js';
@@ -19,6 +19,12 @@ export type SessionEntry = {
   model: string;
   createdAt: number;
   lastUsedAt: number;
+  /**
+   * Cumulative cost / per-model tokens the CLI last reported for this session
+   * (its `result` totals run across turns and resumes), so a turn's own share
+   * is the difference. Chat sessions only.
+   */
+  totals?: { costUsd: number; byModel: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }> };
 };
 
 const KEEP = 500;
@@ -41,7 +47,7 @@ export class SessionIndex {
 
   record(sessionId: string, entry: Omit<SessionEntry, 'createdAt' | 'lastUsedAt'>, now = Date.now()): void {
     const prev = this.entries[sessionId];
-    this.entries[sessionId] = { ...entry, createdAt: prev?.createdAt ?? now, lastUsedAt: now };
+    this.entries[sessionId] = { totals: prev?.totals, ...entry, createdAt: prev?.createdAt ?? now, lastUsedAt: now };
     const ids = Object.keys(this.entries);
     if (ids.length > KEEP) {
       ids
@@ -79,6 +85,57 @@ export function seatHasTranscript(a: Account, sessionId: string): boolean {
   return dirs.some((d) => existsSync(join(root, d, `${sessionId}.jsonl`)));
 }
 
+/** Path of a session's transcript in this seat's config dir, if any. */
+export function transcriptPath(a: Account, sessionId: string): string | undefined {
+  const root = projectsDir(a);
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  for (const d of dirs) {
+    const p = join(root, d, `${sessionId}.jsonl`);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
+ * The exact cwd a session was created in, read from its transcript (every
+ * entry carries `cwd`). The CLI only finds a session under the encoded form
+ * of that exact string, drive-letter case included.
+ */
+export function transcriptCwd(path: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(256 * 1024);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(line);
+      if (m) return JSON.parse(`"${m[1]}"`) as string;
+    }
+  } catch {
+    // unreadable: fall through
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  return undefined;
+}
+
+/** The cwd a resume of `sessionId` must use: the index first, then the transcript. */
+export function sessionCwd(pool: AccountPool, index: SessionIndex, sessionId: string): string | undefined {
+  if (!SESSION_ID_RE.test(sessionId)) return undefined;
+  const known = index.get(sessionId)?.cwd;
+  if (known) return known;
+  for (const a of pool.list()) {
+    const p = transcriptPath(a, sessionId);
+    if (p) return transcriptCwd(p);
+  }
+  return undefined;
+}
+
 /** The seat a session belongs to: the index first, then a transcript scan. */
 export function locateSessionSeat(pool: AccountPool, index: SessionIndex, sessionId: string): Account | undefined {
   const known = index.get(sessionId);
@@ -107,6 +164,11 @@ export function seatForResume(
   index: SessionIndex,
   sessionId: string,
   now = Date.now(),
+  /**
+   * Every seat shares one session store (accounts/sharedSessions.ts): the
+   * owner is preferred, any available seat is accepted otherwise.
+   */
+  cross?: { crossSeat: boolean; model: string; exclude?: Set<string> },
 ): ResumeSeat {
   if (!SESSION_ID_RE.test(sessionId)) {
     return { code: 'invalid_args', error: `"${sessionId}" is not a Claude Code session id (expected a UUID).` };
@@ -119,7 +181,12 @@ export function seatForResume(
     };
   }
   const why = pool.unavailableReason(account, now);
-  if (why === null) return { account };
+  if (why === null && !cross?.exclude?.has(account.id)) return { account };
+  if (cross?.crossSeat) {
+    const other = pool.pick({ model: cross.model, exclude: new Set([account.id, ...(cross.exclude ?? [])]) });
+    if (other.account) return { account: other.account };
+  }
+  if (why === null) return { code: 'unavailable', error: `Session ${sessionId}: no other seat can serve it right now.` };
   const rt = pool.runtime(account.id);
   if (why === 'exhausted') {
     const until = rt.exhaustedUntil ?? now;

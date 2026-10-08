@@ -11,7 +11,7 @@ import type {
 // HTTP — but the request-lifetime and no-op-logger halves of the package are
 // transport-agnostic, so there is no reason to keep a second copy of them.
 import { Deadline, isAbortLike, noopLogger } from '@alfred/provider-openai-compat';
-import type { Account, AccountPool, TokenSample } from './accounts/pool.js';
+import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from './accounts/pool.js';
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
 
@@ -218,7 +218,13 @@ export function __setQueryForTests(fn: QueryFn | null): void {
 // Account failures
 // ---------------------------------------------------------------------------
 
-export type FailureKind = 'limit' | 'auth' | 'other';
+/**
+ * `limit` = the seat's quota is spent (a rejected rate-limit window, a reset
+ * time, or the CLI's "usage limit" wording): bench it until the reset.
+ * `throttle` = a bare 429 / "too many requests" with none of that: a few
+ * seconds' backoff, then any seat (this one included) may serve again.
+ */
+export type FailureKind = 'limit' | 'throttle' | 'auth' | 'other';
 
 /** A failed attempt on one seat, classified so the pool knows whether to move on. */
 export class AccountFailure extends Error {
@@ -232,12 +238,14 @@ export class AccountFailure extends Error {
     this.name = 'AccountFailure';
   }
   get switchable(): boolean {
-    return this.kind === 'limit' || this.kind === 'auth';
+    return this.kind === 'limit' || this.kind === 'throttle' || this.kind === 'auth';
   }
 }
 
-const LIMIT_RE =
-  /usage limit|hit your (?:\w+ )?limit|limit reached|rate[_ -]?limit|too many requests|\b429\b|out of (?:usage|credits)/i;
+/** Quota wording: the seat itself is out until a reset. */
+const QUOTA_RE = /usage limit|hit your (?:\w+ )?limit|limit reached|out of (?:usage|credits)/i;
+/** Transient throttling: retry shortly, possibly elsewhere. */
+const THROTTLE_RE = /rate[_ -]?limit|too many requests|\b429\b|overloaded|\b529\b/i;
 const AUTH_RE =
   /not logged in|please run \/login|invalid (?:api key|bearer token|x-api-key)|oauth token (?:has )?(?:expired|been revoked|revoked)|authentication[_ ](?:failed|error)|\b401\b|unauthori[sz]ed/i;
 
@@ -252,8 +260,13 @@ export function classifyFailure(
   sdkError: string | undefined,
   rejectedUntil: number | null,
 ): { kind: FailureKind; resetsAt: number | null } {
-  if (sdkError === 'rate_limit' || sdkError === 'billing_error' || rejectedUntil !== null || LIMIT_RE.test(detail)) {
-    return { kind: 'limit', resetsAt: rejectedUntil ?? parseResetFromText(detail) };
+  const textReset = parseResetFromText(detail);
+  if (rejectedUntil !== null || sdkError === 'billing_error' || QUOTA_RE.test(detail) || (sdkError === 'rate_limit' && textReset !== null)) {
+    return { kind: 'limit', resetsAt: rejectedUntil ?? textReset };
+  }
+  if (sdkError === 'authentication_failed') return { kind: 'auth', resetsAt: null };
+  if (sdkError === 'rate_limit' || sdkError === 'overloaded' || THROTTLE_RE.test(detail)) {
+    return { kind: 'throttle', resetsAt: null };
   }
   if (sdkError === 'authentication_failed' || AUTH_RE.test(detail)) return { kind: 'auth', resetsAt: null };
   return { kind: 'other', resetsAt: null };
@@ -419,6 +432,19 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
   }
 
+  /**
+   * One tiny completion on exactly `account` — no fallback to another seat —
+   * so a connection test reports the seat that really answered.
+   */
+  async probeSeat(account: Account, model: string, prompt = 'Reply with exactly: OK'): Promise<{ text: string; accountId: string }> {
+    const req: ChatRequest = { model, messages: [{ role: 'user', content: prompt }] };
+    let text = '';
+    for await (const chunk of this.attempt(req, model, buildPrompt(req.messages), account, 'testConnection')) {
+      if (chunk.type === 'done') text = chunk.response.content;
+    }
+    return { text, accountId: account.id };
+  }
+
   /** One attempt of `req` on one seat. Throws {@link AccountFailure} on seat-level errors. */
   private async *attempt(
     req: ChatRequest,
@@ -495,6 +521,14 @@ export class ClaudeCodeProvider implements LLMProvider {
     // from the init message first, then from each assistant message.
     let servedModel: string | undefined;
     const toolUses: string[] = [];
+    // Native tool calls of the current API message. Parallel calls arrive as
+    // one SDK `assistant` message per block (same message id), so they are
+    // collected until the message ends (`message_stop`), then re-emitted.
+    const nativeCalls: Array<{ name: string; input?: unknown }> = [];
+    // Usage of the latest API message, for when the CLI is stopped before
+    // its `result` (re-emitted tool calls, cut replies).
+    let stepUsage: SdkUsage | undefined;
+    let cutAfterToolCall = false;
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
 
@@ -511,6 +545,10 @@ export class ClaudeCodeProvider implements LLMProvider {
           c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? Date.now() + 30 * 60_000;
         pool.markExhausted(account.id, until, detail.slice(0, 200));
         return new AccountFailure(detail, 'limit', account, until);
+      }
+      if (c.kind === 'throttle') {
+        pool.backoff(account.id, THROTTLE_BACKOFF_MS, `throttled: ${detail.slice(0, 180)}`);
+        return new AccountFailure(detail, 'throttle', account, null);
       }
       if (c.kind === 'auth') pool.markAuthFailed(account.id, detail.slice(0, 200));
       return new AccountFailure(detail, c.kind, account, null);
@@ -556,7 +594,17 @@ export class ClaudeCodeProvider implements LLMProvider {
           } else if (event.type === 'message_delta') {
             const md = event as Extract<SdkStreamEvent, { type: 'message_delta' }>;
             if (md.delta?.stop_reason) finishReason = mapStopReason(md.delta.stop_reason);
-            if (md.usage) usage = mergeUsage(usage, md.usage);
+            if (md.usage) {
+              usage = mergeUsage(usage, md.usage);
+              stepUsage = md.usage;
+            }
+          } else if (event.type === 'message_stop' && nativeCalls.length > 0) {
+            const markup = renderNativeCalls(nativeCalls);
+            assembledContent += markup;
+            yield { type: 'text', delta: markup };
+            finishReason = 'stop';
+            cutAfterToolCall = true;
+            break;
           }
         } else if (message.type === 'rate_limit_event') {
           const info = (message as Extract<SdkMessage, { type: 'rate_limit_event' }>).rate_limit_info;
@@ -595,18 +643,16 @@ export class ClaudeCodeProvider implements LLMProvider {
           // prompt-encoded markup. The CLI doesn't know that tool, so letting
           // it continue ends in error_max_turns: re-emit the call as the
           // markup Alfred parses and stop the CLI here.
-          const nativeCalls = (am.message.content ?? []).filter(
+          const calls = (am.message.content ?? []).filter(
             (b): b is { type: 'tool_use'; name: string; input?: unknown } => b.type === 'tool_use',
           );
-          if (nativeCalls.length > 0) {
-            const markup = nativeCalls
-              .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: c.input ?? {} })}\n</tool_call>`)
-              .join('');
-            deadline.disarmTimeout();
-            assembledContent += markup;
-            yield { type: 'text', delta: markup };
+          if (cutAfterToolCall) {
             finishReason = 'stop';
             break;
+          }
+          if (calls.length > 0) {
+            deadline.disarmTimeout();
+            nativeCalls.push(...calls.map((c) => ({ name: c.name, input: c.input })));
           }
         } else if (message.type === 'result') {
           const rm = message as Extract<SdkMessage, { type: 'result' }>;
@@ -646,6 +692,24 @@ export class ClaudeCodeProvider implements LLMProvider {
           }
         }
       }
+      if (nativeCalls.length > 0 && !cutAfterToolCall) {
+        // No `message_stop` seen (partial messages off): emit them now.
+        const markup = renderNativeCalls(nativeCalls);
+        assembledContent += markup;
+        yield { type: 'text', delta: markup };
+        finishReason = 'stop';
+        cutAfterToolCall = true;
+      }
+      if (cutAfterToolCall) {
+        // The rest of this generation is the model talking to itself; stop
+        // the CLI rather than paying for it.
+        this.log.info('reply ended after its tool call', { account: account.id, model });
+        try {
+          controller.abort();
+        } catch {
+          // already gone
+        }
+      }
     } catch (err) {
       if (err instanceof AccountFailure) throw err;
       if (isAbortLike(err) || controller.signal.aborted) {
@@ -672,6 +736,17 @@ export class ClaudeCodeProvider implements LLMProvider {
       // Also runs when the consumer breaks out of the loop early, which is what
       // detaches our listener from the host's long-lived abort signal.
       deadline.dispose();
+      if (!tokens && stepUsage) {
+        // Stopped before the `result` (which carries the totals): the last
+        // API message's usage is the best record of what this cost.
+        tokens = {
+          input: stepUsage.input_tokens ?? 0,
+          output: stepUsage.output_tokens ?? 0,
+          cacheRead: stepUsage.cache_read_input_tokens ?? 0,
+          cacheWrite: stepUsage.cache_creation_input_tokens ?? 0,
+          costUsd: 0,
+        };
+      }
       if (!failed) this.log.info('stream served', { model, servedModel, account: account.id });
       pool.end(account.id, {
         model,
@@ -686,6 +761,13 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     yield { type: 'done', response: buildResponse() };
   }
+}
+
+/** Native tool calls re-emitted as the `<tool_call>` markup Alfred parses. */
+function renderNativeCalls(calls: Array<{ name: string; input?: unknown }>): string {
+  return calls
+    .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: c.input ?? {} })}\n</tool_call>`)
+    .join('');
 }
 
 /** An abort the host recognises and closes the turn quietly on. */

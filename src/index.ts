@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import {
   ClaudeCodeProvider,
   DEFAULT_MODELS,
-  ACCOUNT_SEPARATOR,
   type ClaudeCodeConfig,
 } from './ClaudeCodeProvider.js';
 import { AccountPool, emptyTally, type Account, type Tally } from './accounts/pool.js';
@@ -25,6 +24,16 @@ import {
 } from './session/runner.js';
 import { SessionIndex } from './session/sessions.js';
 import { registerSessionTools } from './session/tools.js';
+import { ensureSharedSessionDirs } from './accounts/sharedSessions.js';
+import {
+  ClaudeSessionAdapter,
+  DEFAULT_CHAT_SESSION_CONFIG,
+  clampPermissionMode,
+  isCliPermissionMode,
+  sessionCapabilities,
+  type ChatSessionConfig,
+} from './agentSession/ClaudeSessionAdapter.js';
+import { ClaudeCodeSessionProvider } from './agentSession/ClaudeSessionProvider.js';
 
 function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
   const ctx =
@@ -64,6 +73,21 @@ function resolveSessionConfig(raw: Record<string, unknown>, cfg: ClaudeCodeConfi
     timeoutMs: positive(raw.sessionTimeoutMs, 30 * 60_000),
     maxTurns: Math.round(positive(raw.sessionMaxTurns, 200)),
     startTimeoutMs: cfg.requestTimeoutMs,
+  };
+}
+
+/** CLI agent mode settings (plan §5.4, §3.2). */
+function resolveChatSessionConfig(raw: Record<string, unknown>, cfg: ClaudeCodeConfig): ChatSessionConfig & { cliMode: boolean; sharedStore: boolean } {
+  const max = isCliPermissionMode(raw.chatPermissionModeMax) ? raw.chatPermissionModeMax : DEFAULT_CHAT_SESSION_CONFIG.permissionModeMax;
+  return {
+    // `cli` (default): a conversation on this provider runs in Claude Code's
+    // own agent loop. `completion`: the old text-only completion path.
+    cliMode: raw.chatMode !== 'completion',
+    permissionMode: clampPermissionMode(raw.chatPermissionMode, DEFAULT_CHAT_SESSION_CONFIG.permissionMode, max),
+    permissionModeMax: max,
+    autoSwitchMidTurn: raw.autoSwitchMidTurn !== false,
+    startTimeoutMs: cfg.requestTimeoutMs,
+    sharedStore: raw.sharedSessionStore !== false,
   };
 }
 
@@ -176,6 +200,7 @@ class UsageRefresher {
 let refresher: UsageRefresher | null = null;
 let poolRef: AccountPool | null = null;
 let runnerRef: SessionRunner | null = null;
+let adapterRef: ClaudeSessionAdapter | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
@@ -195,13 +220,45 @@ const plugin: AlfredPlugin = {
     const usage = new UsageRefresher(pool);
     refresher = usage;
 
-    const provider = new ClaudeCodeProvider({
+    // One session store for every seat, so a conversation can continue on
+    // whichever seat has quota (accounts/sharedSessions.ts).
+    const chatCfg = resolveChatSessionConfig(ctx.config, cfg);
+    let crossSeat = false;
+    const shareSeats = (): void => {
+      if (!chatCfg.sharedStore) return;
+      try {
+        crossSeat = ensureSharedSessionDirs(pool.list(), undefined, ctx.logger).crossSeat;
+      } catch (err) {
+        crossSeat = false;
+        ctx.logger.warn('could not set up the shared session store', { err: (err as Error).message });
+      }
+    };
+    shareSeats();
+    const sessionIndex = new SessionIndex(join(ctx.dataDir, 'sessions.json'));
+
+    const providerOpts = {
       config: cfg,
       pool,
       cli,
       logger: ctx.logger,
-      onAccountUsed: (id) => usage.soon(id),
-    });
+      onAccountUsed: (id: string) => usage.soon(id),
+    };
+    let provider: ClaudeCodeProvider;
+    if (chatCfg.cliMode) {
+      const adapter = new ClaudeSessionAdapter({
+        pool,
+        cli,
+        sessions: sessionIndex,
+        logger: ctx.logger,
+        config: chatCfg,
+        crossSeat: () => crossSeat,
+        onAccountUsed: (id) => usage.soon(id),
+      });
+      adapterRef = adapter;
+      provider = new ClaudeCodeSessionProvider(providerOpts, adapter, sessionCapabilities(chatCfg, crossSeat));
+    } else {
+      provider = new ClaudeCodeProvider(providerOpts);
+    }
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
 
@@ -209,7 +266,7 @@ const plugin: AlfredPlugin = {
     const runner = new SessionRunner({
       pool,
       cli,
-      sessions: new SessionIndex(join(ctx.dataDir, 'sessions.json')),
+      sessions: sessionIndex,
       config: resolveSessionConfig(ctx.config, cfg),
       logger: ctx.logger,
       onAccountUsed: (id) => usage.soon(id),
@@ -247,6 +304,7 @@ const plugin: AlfredPlugin = {
         if (!label) throw new Error('Label required.');
         const token = String(a.token ?? '').trim();
         const account = pool.add(label, token ? 'token' : 'login');
+        shareSeats();
         if (token) pool.setToken(account.id, token);
         else if (a.login !== false) openLoginTerminal(pool, account, cli);
         return { id: account.id };
@@ -324,26 +382,26 @@ const plugin: AlfredPlugin = {
     ctx.registerAction('testConnection', async (args) => {
       const accountId = (args as { accountId?: string } | undefined)?.accountId;
       try {
+        // The seat is chosen here and the probe runs on it alone: the
+        // answer is attributable to that seat, whatever runs in parallel.
+        let account = accountId ? pool.get(accountId) : undefined;
         if (accountId) {
-          const account = pool.get(accountId);
           if (!account) return { ok: false, error: `Unknown account "${accountId}".` };
           const why = pool.unavailableReason(account);
           if (why) return { ok: false, error: `${account.label}: ${why}` };
         }
         const model = firstModel(cfg.modelsRaw);
-        const res = await provider.chat({
-          model: accountId ? `${model}${ACCOUNT_SEPARATOR}${accountId}` : model,
-          messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
-        });
-        const text = res.content.trim();
+        if (!account) {
+          const pick = pool.pick({ model });
+          if (!pick.account) return { ok: false, error: pick.reason };
+          account = pick.account;
+        }
+        const res = await provider.probeSeat(account, model);
+        const text = res.text.trim();
         if (!text) {
-          return { ok: false, error: 'No response from Claude Code (empty output).' };
+          return { ok: false, error: `No response from Claude Code on "${account.label}" (empty output).` };
         }
-        const served = pool.recent.find((r) => r.outcome === 'ok')?.accountId;
-        if (accountId && served !== accountId) {
-          return { ok: false, error: `${accountId} failed; the request was served by ${served ?? 'another account'}.` };
-        }
-        return { ok: true, sample: text.slice(0, 80), account: served };
+        return { ok: true, sample: text.slice(0, 80), account: res.accountId };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
@@ -391,6 +449,8 @@ const plugin: AlfredPlugin = {
   },
 
   deactivate() {
+    adapterRef?.killAll();
+    adapterRef = null;
     runnerRef?.cancelAll();
     runnerRef = null;
     refresher?.stop();
