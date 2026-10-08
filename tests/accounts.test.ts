@@ -326,6 +326,27 @@ describe('provider failover', () => {
     assert.deepEqual(calls, ['tok-2']);
   });
 
+  it('a seat whose CLI stays silent past the timeout is benched and the next seat serves', async () => {
+    const pool = makePool(2);
+    const calls: string[] = [];
+    const ok = fakeRun({ 'tok-2': [textDelta('hi'), okResult] }, calls);
+    __setQueryForTests(((args: { options?: { env?: Record<string, string>; abortController?: AbortController } }) => {
+      if (args.options?.env?.CLAUDE_CODE_OAUTH_TOKEN !== 'tok-1') return (ok as (a: unknown) => unknown)(args);
+      calls.push('tok-1');
+      const signal = args.options!.abortController!.signal;
+      return (async function* () {
+        await new Promise((_r, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+      })();
+    }) as never);
+    const p = new ClaudeCodeProvider({ config: { ...cfg, requestTimeoutMs: 150 }, pool, cli, logger });
+    const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(res.content, 'hi');
+    assert.deepEqual(calls, ['tok-1', 'tok-2']);
+    const first = pool.list()[0];
+    assert.equal(pool.unavailableReason(first), 'exhausted', 'benched for a while');
+    assert.equal(pool.recent[1].outcome, 'switched');
+  });
+
   it('switches on auth failure, and errors with the account name mid-stream', async () => {
     const pool = makePool(2);
     const calls: string[] = [];

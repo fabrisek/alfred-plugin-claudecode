@@ -19,6 +19,9 @@ import { ToolCallCutter } from './toolCallCutter.js';
 /** Backend label prefixed to every error this provider surfaces. */
 const LABEL = 'Claude Code';
 
+/** A seat whose CLI said nothing within the request timeout sits out this long. */
+const SILENT_SEAT_BACKOFF_MS = 5 * 60_000;
+
 /** Separator between a model id and a pinned account id: `opus@seat-3`. */
 export const ACCOUNT_SEPARATOR = '@';
 
@@ -768,10 +771,19 @@ export class ClaudeCodeProvider implements LLMProvider {
         // host contract requires exactly one `done`. A timeout that produced
         // nothing at all is still a failure, so it is reported as one.
         if (!deadline.userAborted && assembledContent.length === 0) {
-          failed = { outcome: 'error', detail: `no output within ${this.opts.config.requestTimeoutMs}ms` };
-          throw new Error(
+          // Nothing reached the caller, so the request can still move on: a
+          // silent seat (seen right after a window reset) is benched for a
+          // few minutes and the next seat gets the request, instead of the
+          // whole turn failing after the wait.
+          const detail = `no output within ${this.opts.config.requestTimeoutMs}ms`;
+          failed = { outcome: 'switched', detail };
+          pool.backoff(account.id, SILENT_SEAT_BACKOFF_MS, `silent: ${detail}`);
+          throw new AccountFailure(
             `${LABEL} produced nothing within ${this.opts.config.requestTimeoutMs}ms on account "${account.label}". ` +
               `Check that the \`claude\` CLI is installed and that account is logged in (Claude accounts page).`,
+            'throttle',
+            account,
+            null,
           );
         }
         yield { type: 'done', response: buildResponse() };

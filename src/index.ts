@@ -269,7 +269,7 @@ const plugin: AlfredPlugin = {
     }
     // What runs on Claude right now, for the panel (webview/activity.ts).
     const activity = new ActivityBoard({ seatLabel: (id) => pool.get(id)?.label });
-    instrumentProvider(provider, activity);
+    instrumentProvider(provider, activity, pool);
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
 

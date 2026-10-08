@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { ChatChunk, ChatRequest, SessionEvent, SessionTurnRequest } from '@alfred/sdk';
-import { ActivityBoard, instrumentProvider, runItem } from '../src/webview/activity.js';
+import { ActivityBoard, instrumentProvider, parseTurn, runItem } from '../src/webview/activity.js';
 import { renderDashboard } from '../src/webview/dashboard.js';
 import type { RunState } from '../src/session/runner.js';
 import { runPage } from './webviewVm.js';
@@ -151,32 +151,105 @@ describe('ActivityBoard', () => {
     assert.equal(await board.stop('turn:live'), false, 'nothing to stop any more');
   });
 
-  it('tracks completion requests through the wrapped stream', async () => {
-    const board = new ActivityBoard();
+  it('groups the requests of one engine turn into one row', async () => {
+    let now = T0;
+    const board = new ActivityBoard({ now: () => now });
+    const sys = { role: 'system', content: 'You are Developer, the user\'s assistant. Rules...' };
+    const ask = { role: 'user', content: 'You have been delegated by agent `pm` to complete task **t-84410d5e**: Fix the crash\nDetails...' };
+    const call = (name: string, args: Record<string, unknown>) => ({ role: 'assistant', content: '', toolCalls: [{ id: name, name, arguments: args }] });
+    const res = (name: string) => ({ role: 'tool', content: 'ok', toolCallId: name });
+    const answer = (tools: string[], out: number): ChatChunk[] => [
+      { type: 'text', delta: 'x' },
+      ...tools.map((n) => ({ type: 'tool_call', call: { id: n, name: n, arguments: {} } }) as ChatChunk),
+      { type: 'done', response: { content: 'x', toolCalls: tools.map((n) => ({ id: n, name: n, arguments: {} })), usage: { outputTokens: out, servedModel: 'claude-opus-5-5' } as never } },
+    ];
+    const req = (messages: unknown[]) => ({ model: 'opus', messages } as unknown as ChatRequest);
+    let next: ChatChunk[] = [];
+    const provider = { stream: (_r: ChatRequest): AsyncIterable<ChatChunk> => feed<ChatChunk>(next) };
+    instrumentProvider(provider, board);
+
+    next = answer(['task_get'], 100);
+    await drain(provider.stream(req([sys, ask])));
+    let [row] = board.view();
+    assert.equal(row.status, 'tool', 'between iterations the host runs the tools');
+    assert.equal(row.detail, 'task_get');
+    now += 2000;
+    next = answer(['read_file'], 50);
+    await drain(provider.stream(req([sys, ask, call('task_get', {}), res('task_get')])));
+    now += 2000;
+    next = answer([], 30);
+    await drain(provider.stream(req([sys, ask, call('task_get', {}), res('task_get'), call('read_file', { p: 'a' }), res('read_file')])));
+    const rows = board.view();
+    assert.equal(rows.length, 1, 'one row per turn, not per request');
+    row = rows[0];
+    assert.equal(row.status, 'done');
+    assert.equal(row.iterations, 3);
+    assert.equal(row.iterationList!.length, 3);
+    assert.deepEqual(row.iterationList!.map((i) => i.tools.join()), ['task_get', 'read_file', '']);
+    assert.equal(row.tokensOut, 180);
+    assert.equal(row.agent, 'Developer');
+    assert.equal(row.from, 'pm');
+    assert.equal(row.taskId, 't-84410d5e');
+    assert.equal(row.title, 'Fix the crash');
+    assert.equal(row.lastTool, 'read_file');
+    assert.equal(row.endedAt! - row.startedAt, 4000);
+    assert.equal(row.loop, undefined);
+
+    next = answer([], 5);
+    await drain(provider.stream(req([sys, ask, call('task_get', {}), res('task_get'), { role: 'assistant', content: 'done' }, { role: 'user', content: 'Now run it' }])));
+    assert.equal(board.view().length, 2, 'a new user message is a new turn');
+    next = answer([], 5);
+    await drain(provider.stream(req([sys, ask])));
+    assert.equal(board.view().length, 3, 'the same prompt again after its turn ended is a new turn');
+  });
+
+  it('flags a real loop: the host loop check, or five identical tool rounds', () => {
+    const sys = { role: 'system', content: 'You are Developer, x' };
+    const ask = { role: 'user', content: 'Wait for the build' };
+    const poll = { role: 'assistant', content: '', toolCalls: [{ id: 'x', name: 'run_shell', arguments: { cmd: 'status' } }] };
+    const out = { role: 'tool', content: 'pending' };
+    const four = [poll, out, poll, out, poll, out, poll, out];
+    assert.equal(parseTurn({ model: 'opus', messages: [sys, ask, ...four] } as unknown as ChatRequest).loop, undefined);
+    const five = parseTurn({ model: 'opus', messages: [sys, ask, ...four, poll, out] } as unknown as ChatRequest);
+    assert.deepEqual(five.loop, { streak: 5, tools: ['run_shell'] });
+    const nudge = { role: 'user', content: '[Alfred loop check] You have made the exact same tool call (run_shell, glob) with identical arguments 10 iterations in a row. ...' };
+    const host = parseTurn({ model: 'opus', messages: [sys, ask, poll, out, nudge] } as unknown as ChatRequest);
+    assert.deepEqual(host.loop, { streak: 10, tools: ['run_shell', 'glob'] });
+    assert.equal(host.key, parseTurn({ model: 'opus', messages: [sys, ask] } as unknown as ChatRequest).key, 'the loop note does not start a new turn');
+    const varied = [poll, out, { ...poll, toolCalls: [{ id: 'y', name: 'read_file', arguments: { p: 1 } }] }, out, poll, out, poll, out, poll, out];
+    assert.equal(parseTurn({ model: 'opus', messages: [sys, ask, ...varied] } as unknown as ChatRequest).loop, undefined, 'progress resets the streak');
+  });
+
+  it('shows the seat as soon as the request takes one, and what it waits for', async () => {
+    const board = new ActivityBoard({ seatLabel: (id) => id.toUpperCase() });
+    const pool = { begin: (_id: string) => {} };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
     const provider = {
       stream: (_r: ChatRequest): AsyncIterable<ChatChunk> =>
-        feed<ChatChunk>([
-          { type: 'text', delta: 'hi' },
-          { type: 'done', response: { content: 'hi', usage: { inputTokens: 50, outputTokens: 7, servedModel: 'claude-sonnet-5' } as never } },
-        ]),
+        (async function* () {
+          await new Promise((r) => setImmediate(r));
+          pool.begin('seat-b');
+          await gate;
+          yield { type: 'thinking', delta: 'hm' } as ChatChunk;
+          yield { type: 'done', response: { content: 'ok' } } as ChatChunk;
+        })(),
     };
-    instrumentProvider(provider, board);
-    await drain(
-      provider.stream({
-        model: 'sonnet',
-        messages: [{ role: 'user', content: 'Summarise this' }],
-        metadata: { agentId: 'coder', source: 'title' },
-        providerOptions: { claudeEffort: 'low' },
-      } as ChatRequest),
-    );
-    const [r] = board.view();
-    assert.equal(r.kind, 'request');
-    assert.equal(r.status, 'done');
-    assert.equal(r.agent, 'coder');
-    assert.equal(r.effort, 'low');
-    assert.equal(r.servedModel, 'claude-sonnet-5');
-    assert.equal(r.tokensOut, 7);
-    assert.equal(r.title, '[title] Summarise this');
+    instrumentProvider(provider, board, pool);
+    const done = drain(provider.stream({ model: 'opus', messages: [{ role: 'user', content: 'hi' }] } as ChatRequest));
+    await new Promise((r) => setTimeout(r, 10));
+    let [row] = board.view();
+    assert.equal(row.status, 'running');
+    assert.equal(row.seat, 'SEAT-B');
+    assert.equal(row.phase, 'waiting for first output');
+    assert.equal(row.iterationList![0].seat, 'SEAT-B');
+    release();
+    await done;
+    [row] = board.view();
+    assert.equal(row.status, 'done');
+    assert.equal(row.phase, undefined);
+    pool.begin('seat-c');
+    assert.equal(board.view()[0].seat, 'SEAT-B', 'a seat taken outside a request is not attributed');
   });
 
   it('maps a claude_code_run session', () => {
@@ -470,6 +543,37 @@ describe('Claude panel page', () => {
     await page.click(btn(page, 'refresh', 'a'));
     assert.match(page.$('flash')!.textContent, /seat is busy/);
     assert.equal(btn(page, 'refresh', 'a')!.disabled, false, 'a failed action re-enables its button');
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('shows an engine turn as one row, with its iterations on demand and a loop badge', async () => {
+    const turn = {
+      id: 'eturn:1', kind: 'request', title: 'Fix the crash', agent: 'Developer', from: 'pm', taskId: 't-84410d5e',
+      model: 'opus', servedModel: 'claude-opus-5-5', seat: 'A', status: 'tool', detail: 'run_shell', startedAt: T0 - 20_000,
+      lastEventAt: T0 - 200_000, tokensOut: 900, iterations: 2, lastTool: 'run_shell', canStop: false, subagents: [],
+      loop: { streak: 6, tools: ['run_shell'] },
+      iterationList: [
+        { n: 1, startedAt: T0 - 20_000, endedAt: T0 - 15_000, status: 'done', tools: ['task_get'], seat: 'A', tokensOut: 400 },
+        { n: 2, startedAt: T0 - 10_000, endedAt: T0 - 5_000, status: 'done', tools: ['run_shell'], seat: 'A', tokensOut: 500 },
+      ],
+    };
+    const { invoke } = bridge(snapshot([turn]));
+    const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
+    const row = () => page.doc.querySelector('tr[data-key=a:eturn:1]')!.textContent.replace(/\s+/g, ' ');
+    assert.match(row(), /Developer ← pm · t-84410d5e Fix the crash/);
+    assert.match(row(), /tools/, 'waiting on its tools');
+    assert.doesNotMatch(row(), /stalled/, 'a turn running its tools is not stalled');
+    assert.match(row(), /loop ×6/);
+    assert.match(row(), /2 iterations/);
+    assert.match(row(), /running run_shell/);
+    assert.equal(page.doc.querySelectorAll('#act tr').length, 1, 'iterations hidden until asked');
+    await page.click(btn(page, 'iters', 'eturn:1'));
+    const iters = page.doc.querySelectorAll('#act tr.sub').map((tr) => tr.textContent.replace(/\s+/g, ' '));
+    assert.equal(iters.length, 2);
+    assert.match(iters[0], /#2 called run_shell/);
+    assert.match(iters[1], /#1 called task_get/);
+    await page.click(btn(page, 'iters', 'eturn:1'));
+    assert.equal(page.doc.querySelectorAll('#act tr.sub').length, 0);
     assert.deepEqual(page.errors, []);
   });
 

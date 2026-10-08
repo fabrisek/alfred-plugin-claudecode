@@ -15,6 +15,7 @@
  * runner's own state when the panel asks.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ChatChunk, ChatRequest, SessionEvent, SessionTurnRequest, SessionUsage } from '@alfred/sdk';
 import type { RunState } from '../session/runner.js';
 
@@ -22,6 +23,8 @@ export type ActivityKind = 'chat' | 'request' | 'run';
 export type ActivityStatus =
   | 'starting'
   | 'running'
+  /** Engine turn between two iterations: the host is running the tools the model asked for. */
+  | 'tool'
   | 'compacting'
   | 'retrying'
   | 'done'
@@ -69,9 +72,36 @@ export type ActivityItem = {
   contextWindow?: number;
   subagents: SubagentView[];
   canStop: boolean;
+  /** Delegating agent and task, for a delegated turn. */
+  from?: string;
+  taskId?: string;
+  /** Engine turns: provider requests so far and the last ones. */
+  iterations?: number;
+  iterationList?: IterationView[];
+  lastTool?: string;
+  /** Tool calls made earlier in this turn (from the request history). */
+  toolsSoFar?: number;
+  /** Identical tool calls repeated: the host's loop check fired, or the history shows the streak. */
+  loop?: { streak: number; tools: string[] };
+  /** What a running engine request is doing: waiting for a seat, for first output, thinking, writing… */
+  phase?: string;
 };
 
-const LIVE: ReadonlySet<ActivityStatus> = new Set(['starting', 'running', 'compacting', 'retrying']);
+export type IterationView = {
+  n: number;
+  startedAt: number;
+  endedAt?: number;
+  status: 'running' | 'done' | 'failed' | 'cancelled' | 'stopped';
+  tools: string[];
+  tokensOut?: number;
+  seat?: string;
+  phase?: string;
+};
+
+type RequestScope = { item: ActivityItem; iteration: IterationView };
+const requestScope = new AsyncLocalStorage<RequestScope>();
+
+const LIVE: ReadonlySet<ActivityStatus> = new Set(['starting', 'running', 'tool', 'compacting', 'retrying']);
 export const isLive = (s: ActivityStatus): boolean => LIVE.has(s);
 
 /** Finished items kept for the panel. */
@@ -80,6 +110,11 @@ const KEEP_FINISHED_MAX = 12;
 /** Sub-agents listed per item (the running ones always are). */
 const SUBAGENTS_MAX = 12;
 const TITLE_MAX = 90;
+const ITERATIONS_MAX = 40;
+/** An engine turn waiting on its tools this long without a new iteration is over. */
+const TOOL_WAIT_MAX_MS = 30 * 60_000;
+/** Same rule as the host's loop check (core/chat/turn/loopDetector.ts). */
+const LOOP_STREAK = 5;
 
 type Tracked = ActivityItem & {
   /** Tool use id of the running top-level tool. */
@@ -108,6 +143,8 @@ function inputOf(u: SessionUsage | undefined): number | undefined {
 
 export class ActivityBoard {
   private readonly items = new Map<string, Tracked>();
+  /** Engine turn fingerprint -> its row. */
+  private readonly groups = new Map<string, { id: string; live: number }>();
   private readonly now: () => number;
   private seq = 0;
 
@@ -308,45 +345,143 @@ export class ActivityBoard {
     );
   }
 
-  /** Wraps one completion request (the non-CLI path: delegations, tools, titles…). */
+  /**
+   * Wraps one completion request. In Alfred's own (engine) loop a turn is a
+   * series of requests, one after every round of tool calls, so requests are
+   * grouped into one row per turn. The host strips the caller metadata before
+   * a provider sees a request (sdk `ChatRequest.metadata`: providers must not
+   * read it), so the turn is recognised from the request itself: same system
+   * prompt, same anchoring user message (see {@link parseTurn}).
+   */
   async *observeRequest(req: ChatRequest, chunks: AsyncIterable<ChatChunk>): AsyncIterable<ChatChunk> {
-    const meta = req.metadata ?? {};
-    const lastUser = [...(req.messages ?? [])].reverse().find((m) => m.role === 'user');
-    const text = typeof lastUser?.content === 'string' ? lastUser.content : '';
-    const effort = req.providerOptions?.claudeEffort;
-    const t = this.open({
-      id: `req:${++this.seq}`,
-      kind: 'request',
-      title: oneLine(meta.source ? `[${meta.source}] ${text}` : text) || '(request)',
-      agent: meta.agentId,
-      conversationId: meta.conversationId,
-      model: req.model,
-      effort: typeof effort === 'string' ? effort : undefined,
-      status: 'running',
-      startedAt: this.now(),
-    });
+    const info = parseTurn(req);
+    const now = this.now();
+    const known = this.groups.get(info.key);
+    let item = known ? this.items.get(known.id) : undefined;
+    let group = known;
+    // The same prompt sent again after its turn ended is a new turn.
+    if (item && !isLive(item.status) && info.rounds === 0) item = undefined;
+    if (!item || !group) {
+      const effort = req.providerOptions?.claudeEffort;
+      item = this.open({
+        id: `eturn:${++this.seq}`,
+        kind: 'request',
+        title: info.title || '(request)',
+        agent: info.agent,
+        from: info.from,
+        taskId: info.taskId,
+        model: req.model,
+        effort: typeof effort === 'string' ? effort : undefined,
+        status: 'running',
+        startedAt: now,
+      });
+      item.iterationList = [];
+      item.iterations = 0;
+      item.tokensOut = 0;
+      group = { id: item.id, live: 0 };
+      this.groups.set(info.key, group);
+    }
+    const t = item;
+    const g = group;
+    // A finished turn that gets another request carries on (auto-continue, retry).
+    t.status = 'running';
+    t.endedAt = undefined;
+    t.lastEventAt = now;
+    t.toolsSoFar = info.toolsSoFar;
+    if (info.lastTool) t.lastTool = info.lastTool;
+    t.loop = info.loop;
+    t.detail = undefined;
+    t.iterations = (t.iterations ?? 0) + 1;
+    const it: IterationView = { n: t.iterations, startedAt: now, status: 'running', tools: [] };
+    t.iterationList = [...(t.iterationList ?? []), it].slice(-ITERATIONS_MAX);
+    g.live++;
+    let outcome: 'done' | 'tool' | 'failed' | 'cancelled' | 'stopped' = 'stopped';
+    let error: string | undefined;
+    t.phase = 'waiting for a seat';
+    it.phase = t.phase;
+    const scope: RequestScope = { item: t, iteration: it };
+    const iter = chunks[Symbol.asyncIterator]();
+    let finished = false;
     try {
-      for await (const c of chunks) {
+      for (;;) {
+        // The provider's own code runs inside next(): the seat it takes there
+        // (pool.begin) is attributed to this request through the scope.
+        const r = await requestScope.run(scope, () => iter.next());
+        if (r.done) {
+          finished = true;
+          break;
+        }
+        const c = r.value;
         t.lastEventAt = this.now();
-        if (c.type === 'tool_call') t.detail = c.call.name;
+        const phase =
+          c.type === 'thinking' ? 'thinking' : c.type === 'text' ? 'writing' : c.type === 'tool_call_delta' || c.type === 'tool_call' ? 'calling tools' : undefined;
+        if (phase) {
+          t.phase = phase;
+          it.phase = phase;
+        }
+        if (c.type === 'tool_call') {
+          if (!it.tools.includes(c.call.name)) it.tools.push(c.call.name);
+          t.lastTool = c.call.name;
+        }
         if (c.type === 'done') {
           const u = c.response.usage as (SessionUsage & { servedModel?: string }) | undefined;
           if (u?.servedModel) t.servedModel = u.servedModel;
-          // No `tokensIn`: this usage carries the uncached input only (cache
-          // reads are most of a Claude prompt), so it would read as ~0.
-          if (u?.outputTokens) t.tokensOut = u.outputTokens;
-          if (u?.contextUsed) t.contextUsed = u.contextUsed;
-          this.close(t, 'done');
+          if (u?.outputTokens) {
+            it.tokensOut = u.outputTokens;
+            t.tokensOut = (t.tokensOut ?? 0) + u.outputTokens;
+          }
+          for (const call of c.response.toolCalls ?? []) {
+            if (!it.tools.includes(call.name)) it.tools.push(call.name);
+            t.lastTool = call.name;
+          }
+          outcome = it.tools.length > 0 ? 'tool' : 'done';
         }
         yield c;
       }
     } catch (err) {
-      const msg = (err as Error)?.message ?? String(err);
-      this.close(t, req.signal?.aborted ? 'cancelled' : 'failed', oneLine(msg, 300));
+      finished = true;
+      outcome = req.signal?.aborted ? 'cancelled' : 'failed';
+      error = oneLine((err as Error)?.message ?? String(err), 300);
       throw err;
     } finally {
-      this.close(t, req.signal?.aborted ? 'cancelled' : 'stopped', req.signal?.aborted ? undefined : 'ended without a response');
+      if (!finished) await iter.return?.();
+      t.phase = undefined;
+      it.phase = undefined;
+      if (outcome === 'stopped' && req.signal?.aborted) outcome = 'cancelled';
+      const end = this.now();
+      it.endedAt = end;
+      it.status = outcome === 'tool' ? 'done' : outcome;
+      g.live = Math.max(0, g.live - 1);
+      t.lastEventAt = end;
+      if (g.live === 0) {
+        if (outcome === 'tool') {
+          // The host runs the tools, then sends the next iteration.
+          t.status = 'tool';
+          t.detail = it.tools.join(', ');
+        } else {
+          t.status = outcome;
+          t.endedAt = end;
+          t.detail = error ?? (outcome === 'stopped' ? 'ended without a response' : undefined);
+        }
+      }
     }
+  }
+
+  /**
+   * A seat was taken (pool.begin). Inside an observed completion request it
+   * belongs to that request: the row shows the seat from the moment it is
+   * assigned, not only once the answer is back.
+   */
+  seatTaken(seatId: string): void {
+    const scope = requestScope.getStore();
+    if (!scope) return;
+    const label = this.label(seatId);
+    scope.item.seatId = seatId;
+    scope.item.seat = label;
+    scope.iteration.seat = label;
+    scope.item.phase = 'waiting for first output';
+    scope.iteration.phase = scope.item.phase;
+    scope.item.lastEventAt = this.now();
   }
 
   /** Graceful stop of a live conversation turn. */
@@ -361,10 +496,18 @@ export class ActivityBoard {
 
   private prune(): void {
     const now = this.now();
+    for (const t of this.items.values()) {
+      if (t.status === 'tool' && now - t.lastEventAt > TOOL_WAIT_MAX_MS) {
+        t.status = 'stopped';
+        t.endedAt = t.lastEventAt;
+        t.detail = 'no further iteration after its tools';
+      }
+    }
     const finished = [...this.items.values()].filter((t) => !isLive(t.status)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
     finished.forEach((t, i) => {
       if (i >= KEEP_FINISHED_MAX || now - (t.endedAt ?? now) > KEEP_FINISHED_MS) this.items.delete(t.id);
     });
+    for (const [k, g] of this.groups) if (!this.items.has(g.id)) this.groups.delete(k);
   }
 
   /** Live items first (oldest first), then the recently finished (newest first). */
@@ -372,7 +515,11 @@ export class ActivityBoard {
     this.prune();
     const all: ActivityItem[] = [...this.items.values()].map((t) => {
       const { subByToolUse: _a, toolUseId: _b, stop: _c, stopRequested: _d, ...view } = t;
-      return { ...view, subagents: t.subagents.map((s) => ({ ...s })) };
+      return {
+        ...view,
+        subagents: t.subagents.map((s) => ({ ...s })),
+        iterationList: t.iterationList?.map((i) => ({ ...i, tools: [...i.tools] })),
+      };
     });
     all.push(...extra);
     const live = all.filter((t) => isLive(t.status)).sort((a, b) => a.startedAt - b.startedAt);
@@ -423,7 +570,14 @@ type Instrumentable = {
  * wrappers on the instance, so `chat()` (which drains `this.stream`) is
  * covered too, and the session facet stays structurally visible to the host.
  */
-export function instrumentProvider(provider: Instrumentable, board: ActivityBoard): void {
+export function instrumentProvider(provider: Instrumentable, board: ActivityBoard, pool?: { begin(id: string): void }): void {
+  if (pool) {
+    const begin = pool.begin.bind(pool);
+    pool.begin = (id: string) => {
+      begin(id);
+      board.seatTaken(id);
+    };
+  }
   const stream = provider.stream.bind(provider);
   provider.stream = (req: ChatRequest) => board.observeRequest(req, stream(req));
   const run = provider.runSessionTurn?.bind(provider);
@@ -432,4 +586,123 @@ export function instrumentProvider(provider: Instrumentable, board: ActivityBoar
     provider.runSessionTurn = (req: SessionTurnRequest) =>
       board.observeTurn(req, run(req), interrupt ? () => interrupt(req.turnId) : undefined);
   }
+}
+
+// ---- engine turns -----------------------------------------------------------
+
+export type TurnInfo = {
+  key: string;
+  title: string;
+  agent?: string;
+  from?: string;
+  taskId?: string;
+  toolsSoFar: number;
+  lastTool?: string;
+  loop?: { streak: number; tools: string[] };
+  /** Assistant rounds after the anchor: 0 = the first request of a turn. */
+  rounds: number;
+};
+
+const LOOP_NOTE = '[Alfred loop check]';
+const DELEGATION_RE = /^You have been delegated by agent `([^`]+)` to complete task \*\*([^*]+)\*\*:?\s*([\s\S]*)/;
+const LOOP_NOTE_RE = /\(([^)]*)\) with identical arguments (\d+) iterations/;
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text?: unknown }).text ?? '') : '')).join(' ');
+  }
+  return '';
+}
+
+function hash(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function stable(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'undefined';
+  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
+  return `{${Object.keys(v as Record<string, unknown>)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`)
+    .join(',')}}`;
+}
+
+/**
+ * Who and what an engine request belongs to, from the request alone.
+ *
+ * The anchor is the last user message that is not a host note (`[Alfred …]`,
+ * e.g. the loop check): every iteration of one turn re-sends the history up
+ * to it, then the tool rounds after it. The fingerprint is the model, the
+ * system prompt head and the anchor's text. The agent name is
+ * the persona line ("You are <name>, …"); a delegation is read from the
+ * prompt the host writes for it.
+ */
+export function parseTurn(req: ChatRequest): TurnInfo {
+  type Msg = { role: string; content: unknown; toolCalls?: Array<{ name: string; arguments?: unknown }> };
+  const msgs = (req.messages ?? []) as unknown as Msg[];
+  let anchor = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user' && !textOf(msgs[i].content).startsWith('[Alfred ')) {
+      anchor = i;
+      break;
+    }
+  }
+  const system = msgs
+    .filter((m) => m.role === 'system')
+    .map((m) => textOf(m.content))
+    .join('\n');
+  const prompt = anchor >= 0 ? textOf(msgs[anchor].content) : '';
+  const persona = /^You are ([^,.\n]{1,60})[,.]/.exec(system.trimStart());
+  const agent = persona ? persona[1].trim() : undefined;
+  // Not the anchor's index: a windowed history moves it within one turn.
+  const key = hash(`${req.model}\u0000${system.slice(0, 4000)}\u0000${prompt.slice(0, 4000)}`);
+
+  let title = oneLine(prompt);
+  let from: string | undefined;
+  let taskId: string | undefined;
+  const d = DELEGATION_RE.exec(prompt.trim());
+  if (d) {
+    from = d[1];
+    taskId = d[2].trim();
+    title = oneLine(d[3].split('\n')[0]) || taskId;
+  }
+
+  // Tool rounds after the anchor, and the repetition streak at their tail.
+  const rounds: string[] = [];
+  let toolsSoFar = 0;
+  let lastTool: string | undefined;
+  let loop: TurnInfo['loop'];
+  for (const m of msgs.slice(anchor + 1)) {
+    if (m.role === 'assistant') {
+      const calls = m.toolCalls ?? [];
+      toolsSoFar += calls.length;
+      if (calls.length) lastTool = calls[calls.length - 1].name;
+      rounds.push(
+        calls
+          .map((c) => `${c.name}(${stable(c.arguments ?? {})})`)
+          .sort()
+          .join('|'),
+      );
+    }
+    if (m.role === 'user' && textOf(m.content).startsWith(LOOP_NOTE)) {
+      const n = LOOP_NOTE_RE.exec(textOf(m.content));
+      loop = {
+        streak: n ? Number(n[2]) : LOOP_STREAK,
+        tools: n ? n[1].split(',').map((x) => x.trim()).filter(Boolean) : [],
+      };
+    }
+  }
+  const tail = rounds[rounds.length - 1];
+  let streak = 0;
+  for (let i = rounds.length - 1; i >= 0 && tail && rounds[i] === tail; i--) streak++;
+  if (tail && streak >= LOOP_STREAK && (!loop || streak > loop.streak)) {
+    loop = { streak, tools: [...new Set(tail.split('|').map((c) => c.slice(0, c.indexOf('('))))] };
+  }
+  return { key, title, agent, from, taskId, toolsSoFar, lastTool, loop, rounds: rounds.length };
 }

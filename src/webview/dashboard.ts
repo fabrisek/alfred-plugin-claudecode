@@ -287,12 +287,15 @@ function setHtml(id, html) {
 
 // ---- activity -------------------------------------------------------------
 
-var LIVE = { starting: 1, running: 1, compacting: 1, retrying: 1 };
+var LIVE = { starting: 1, running: 1, tool: 1, compacting: 1, retrying: 1 };
 function isLive(s) { return LIVE[s] === 1; }
-var ACT_PILL = { starting: 'info', running: 'info', compacting: 'warn', retrying: 'warn', done: 'ok', failed: 'err',
+var ACT_PILL = { starting: 'info', running: 'info', tool: 'info', compacting: 'warn', retrying: 'warn', done: 'ok', failed: 'err',
   limit: 'err', timeout: 'err', interrupted: 'idle', cancelled: 'idle', stopped: 'warn' };
 var SUB_PILL = { running: 'info', completed: 'ok', failed: 'err', cancelled: 'idle', stopped: 'warn' };
-var KIND_TAG = { chat: 'chat', run: 'session', request: 'request' };
+var KIND_TAG = { chat: 'cli', run: 'session', request: 'turn' };
+var STATUS_LABEL = { tool: 'tools' };
+var IT_PILL = { running: 'info', done: 'ok', failed: 'err', cancelled: 'idle', stopped: 'warn' };
+var openIters = {};
 
 function timeCell(startedAt, endedAt) {
   return endedAt
@@ -300,35 +303,74 @@ function timeCell(startedAt, endedAt) {
     : '<span class="num">' + live('since', startedAt) + '</span>';
 }
 
+function turnTitle(a) {
+  // Engine turns: who works, for whom, on what. The raw prompt is the title's last part only.
+  var who = a.agent || '';
+  if (a.from) who += (who ? ' \\u2190 ' : '\\u2190 ') + a.from;
+  var what = (a.taskId ? a.taskId + ' ' : '') + (a.title || '');
+  return { who: who, what: what };
+}
+
 function activityRows(list) {
   var now = Date.now();
   var rows = [];
   list.forEach(function (a) {
     var running = isLive(a.status);
-    var stalled = running && now - a.lastEventAt > (STALL_MS[a.kind] || 120000);
-    var status = stalled ? 'stalled' : a.status;
+    // A turn waiting on its tools is not stalled: the host is working.
+    var stalled = running && a.status !== 'tool' && now - a.lastEventAt > (STALL_MS[a.kind] || 120000);
+    var status = stalled ? 'stalled' : (STATUS_LABEL[a.status] || a.status);
     var pill = '<span class="pill ' + (stalled ? 'warn' : ACT_PILL[a.status] || 'idle') + '"'
-      + (stalled ? ' title="No event for ' + esc(fmtDur(now - a.lastEventAt)) + '"' : '') + '>' + esc(status) + '</span>';
+      + (stalled ? ' title="No event for ' + esc(fmtDur(now - a.lastEventAt)) + '"' : '') + '>' + esc(status) + '</span>'
+      + (a.loop ? ' <span class="pill err" title="Same tool calls with identical arguments ' + a.loop.streak + ' times in a row: '
+        + esc(a.loop.tools.join(', ')) + '">loop \\u00d7' + a.loop.streak + '</span>' : '');
     var subRun = a.subagents.filter(function (s) { return s.status === 'running'; }).length;
+    var tt = turnTitle(a);
     var meta = [];
-    if (a.agent) meta.push(esc(a.agent));
-    if (a.subagents.length) meta.push(subRun + '/' + a.subagents.length + ' sub-agents running');
-    if (a.detail) meta.push('<span class="' + (running ? '' : 'muted') + '">' + esc(a.detail) + '</span>');
+    if (a.kind === 'request') {
+      if (a.iterations) meta.push(a.iterations + (a.iterations === 1 ? ' iteration' : ' iterations'));
+      if (running && a.phase) meta.push('<span>' + esc(a.phase) + '</span>');
+      else if (a.status === 'tool' && a.detail) meta.push('<span>running ' + esc(a.detail) + '</span>');
+      else if (a.lastTool) meta.push('last tool ' + esc(a.lastTool));
+      if (!running && a.detail) meta.push('<span class="muted">' + esc(a.detail) + '</span>');
+    } else {
+      if (a.agent) meta.push(esc(a.agent));
+      if (a.subagents.length) meta.push(subRun + '/' + a.subagents.length + ' sub-agents running');
+      if (a.detail) meta.push('<span class="' + (running ? '' : 'muted') + '">' + esc(a.detail) + '</span>');
+    }
     var model = shortModel(a.servedModel || a.model);
     var ctx = a.contextUsed ? fmtTokens(a.contextUsed) + (a.contextWindow ? ' / ' + fmtTokens(a.contextWindow) : '') : '';
     var tok = (a.tokensOut != null ? fmtTokens(a.tokensOut) + ' out' : '') + (a.tokensIn ? ' \\u00b7 ' + fmtTokens(a.tokensIn) + ' in' : '');
+    var iters = a.iterationList || [];
+    var canOpen = a.kind === 'request' && iters.length > 0;
+    var open = canOpen && openIters[a.id];
+    var head = a.kind === 'request' && tt.who
+      ? '<b>' + esc(tt.who) + '</b> \\u00b7 ' + esc(tt.what)
+      : esc(a.title);
     var html = '<tr class="' + (running ? 'cur' : '') + '">'
-      + '<td>' + pill + '</td>'
-      + '<td><div class="ell" title="' + esc(a.title) + '"><span class="tag">' + KIND_TAG[a.kind] + '</span> ' + esc(a.title) + '</div>'
-      + (meta.length ? '<div class="muted small ell" title="' + esc(a.detail || '') + '">' + meta.join(' \\u00b7 ') + '</div>' : '') + '</td>'
+      + '<td class="nowrap">' + pill + '</td>'
+      + '<td><div class="ell" title="' + esc((tt.who ? tt.who + ' \\u00b7 ' : '') + tt.what) + '">'
+      + (canOpen ? '<button class="x" data-act="iters" data-id="' + esc(a.id) + '" title="Show the requests of this turn">' + (open ? '\\u25be' : '\\u25b8') + '</button>' : '')
+      + '<span class="tag">' + KIND_TAG[a.kind] + '</span> ' + head + '</div>'
+      + (meta.length ? '<div class="muted small ell" title="' + esc(a.detail || a.phase || '') + '">' + meta.join(' \\u00b7 ') + '</div>' : '') + '</td>'
       + '<td class="nowrap"><span class="mono" title="' + esc(a.model || '') + (a.servedModel ? ' \\u2192 ' + esc(a.servedModel) : '') + '">' + esc(model) + '</span>'
       + (a.effort ? ' <span class="tag">' + esc(a.effort) + '</span>' : '') + '</td>'
-      + '<td class="nowrap">' + esc(a.seat || '') + '</td>'
+      + '<td class="nowrap">' + (a.seat ? esc(a.seat) : running ? '<span class="muted">no seat yet</span>' : '') + '</td>'
       + '<td class="num small">' + tok + (ctx ? '<div class="muted" title="Context used">ctx ' + ctx + '</div>' : '') + '</td>'
       + '<td class="nowrap">' + timeCell(a.startedAt, a.endedAt) + '</td>'
       + '<td><div class="acts">' + (a.canStop ? armBtn('stop', a.id, 'Stop', 'Confirm stop') : '') + '</div></td>'
       + '</tr>';
     rows.push({ key: 'a:' + a.id, html: html });
+    if (open) {
+      iters.slice().reverse().forEach(function (i) {
+        var what = i.tools.length ? 'called ' + i.tools.join(', ') : i.status === 'running' ? (i.phase || 'running') : 'answered';
+        rows.push({ key: 'i:' + a.id + ':' + i.n, html: '<tr class="sub">'
+          + '<td><span class="pill ' + (IT_PILL[i.status] || 'idle') + '">' + esc(i.status) + '</span></td>'
+          + '<td class="what"><div class="ell">\\u21b3 #' + i.n + ' ' + esc(what) + '</div></td>'
+          + '<td></td><td class="nowrap">' + esc(i.seat || '') + '</td>'
+          + '<td class="num small">' + (i.tokensOut ? fmtTokens(i.tokensOut) + ' out' : '') + '</td>'
+          + '<td class="nowrap">' + timeCell(i.startedAt, i.endedAt) + '</td><td></td></tr>' });
+      });
+    }
     a.subagents.forEach(function (s) {
       var line = s.summary || s.lastTool || '';
       rows.push({ key: 's:' + a.id + ':' + s.id, html: '<tr class="sub">'
@@ -524,6 +566,7 @@ function onAct(b) {
   var a = accountOf(id);
   if (act === 'flash-close') { flash('', ''); return; }
   if (act === 'more') { openDetails[id] = !openDetails[id]; render(); return; }
+  if (act === 'iters') { openIters[id] = !openIters[id]; render(); return; }
   if (act === 'remove') {
     if (arm('remove:' + id)) return;
     var name = labelOf(id);
