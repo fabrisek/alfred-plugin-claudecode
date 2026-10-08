@@ -160,6 +160,26 @@ const BUILTIN_TOOLS = [
   'Agent',
   'TodoWrite',
   'ExitPlanMode',
+  'PowerShell',
+  'Skill',
+  'ToolSearch',
+  'Monitor',
+  'Workflow',
+  'SendMessage',
+  'ListAgents',
+  'ScheduleWakeup',
+  'PushNotification',
+  'RemoteTrigger',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'EnterWorktree',
+  'ExitWorktree',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskStop',
+  'TaskUpdate',
 ];
 
 const denyAllTools: CanUseTool = async (toolName) => ({
@@ -422,9 +442,17 @@ export class ClaudeCodeProvider implements LLMProvider {
     };
     if (built.systemPrompt) options.systemPrompt = built.systemPrompt;
     if (this.opts.cli.path) options.pathToClaudeCodeExecutable = this.opts.cli.path;
-    const effort = req.providerOptions?.claudeEffort;
-    if (this.opts.cli.native && typeof effort === 'string' && /^(low|medium|high|xhigh|max)$/.test(effort)) {
-      options.extraArgs = { effort };
+    if (this.opts.cli.native) {
+      // The deny list above can't keep up with new CLI tools (PowerShell,
+      // Skill, ToolSearch, Monitor...): Opus would call one, the CLI denies it
+      // and the single allowed turn ends in error_max_turns with no text.
+      // `--tools ""` removes every built-in tool, `--strict-mcp-config` drops
+      // user MCP servers, `--disable-slash-commands` drops skills.
+      options.extraArgs = { tools: '', 'strict-mcp-config': null, 'disable-slash-commands': null };
+      const effort = req.providerOptions?.claudeEffort;
+      if (typeof effort === 'string' && /^(low|medium|high|xhigh|max)$/.test(effort)) {
+        options.extraArgs.effort = effort;
+      }
     }
 
     this.log.info('stream request', {

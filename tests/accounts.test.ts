@@ -285,7 +285,12 @@ describe('provider failover', () => {
       messages: [{ role: 'system', content: 'S' }, { role: 'user', content: 'u', images: ['/9j/AAAA'] }],
     });
     assert.equal(seen.options?.systemPrompt, 'S');
-    assert.deepEqual(seen.options?.extraArgs, { effort: 'high' });
+    assert.deepEqual(seen.options?.extraArgs, {
+      tools: '',
+      'strict-mcp-config': null,
+      'disable-slash-commands': null,
+      effort: 'high',
+    });
     assert.equal((seen.content?.[1] as { type: string }).type, 'image');
     __setQueryForTests(null);
   });
