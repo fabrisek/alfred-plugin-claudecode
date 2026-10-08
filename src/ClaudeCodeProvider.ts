@@ -160,6 +160,10 @@ const BUILTIN_TOOLS = [
   'Agent',
   'TodoWrite',
   'ExitPlanMode',
+  'EnterPlanMode',
+  'AskUserQuestion',
+  'TaskOutput',
+  'LSP',
   'PowerShell',
   'Skill',
   'ToolSearch',
@@ -302,13 +306,20 @@ export class ClaudeCodeProvider implements LLMProvider {
       // provider declares `tools: false`, so Alfred encodes its tool protocol
       // as text), which is exactly the case compact descriptions exist for.
       inlinesToolSchemas: true,
-      // Thinking mode maps onto the CLI's `--effort` (native CLI only). There
-      // is no "off" for adaptive thinking; it maps to the lowest effort.
+      // Every request is its own CLI process on a subscription seat, so the
+      // backend isn't the bottleneck the way a local model is: let
+      // `delegate_parallel` use the host's full fan-out.
+      maxConcurrentRequests: 9,
+      // Thinking mode maps onto the CLI's `--effort` (native CLI only), one
+      // mode per effort level; the UI offers exactly these. There is no "off"
+      // for adaptive thinking, so it is not declared: a conversation still
+      // storing `off` runs at the nearest declared mode (`low`) on the host.
       thinkingModeOptions: {
-        off: { claudeEffort: 'low' },
         low: { claudeEffort: 'low' },
         medium: { claudeEffort: 'medium' },
         high: { claudeEffort: 'high' },
+        xhigh: { claudeEffort: 'xhigh' },
+        max: { claudeEffort: 'max' },
       },
       // Alfred's own prompt-encoded protocol is Qwen-style `<tool_call>` JSON,
       // and that is the only textual protocol this provider's replies can
@@ -564,6 +575,23 @@ export class ClaudeCodeProvider implements LLMProvider {
               }
             }
             if (am.message.stop_reason) finishReason = mapStopReason(am.message.stop_reason);
+          }
+          // Opus sometimes calls an Alfred tool natively instead of writing the
+          // prompt-encoded markup. The CLI doesn't know that tool, so letting
+          // it continue ends in error_max_turns: re-emit the call as the
+          // markup Alfred parses and stop the CLI here.
+          const nativeCalls = (am.message.content ?? []).filter(
+            (b): b is { type: 'tool_use'; name: string; input?: unknown } => b.type === 'tool_use',
+          );
+          if (nativeCalls.length > 0) {
+            const markup = nativeCalls
+              .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: c.input ?? {} })}\n</tool_call>`)
+              .join('');
+            deadline.disarmTimeout();
+            assembledContent += markup;
+            yield { type: 'text', delta: markup };
+            finishReason = 'stop';
+            break;
           }
         } else if (message.type === 'result') {
           const rm = message as Extract<SdkMessage, { type: 'result' }>;

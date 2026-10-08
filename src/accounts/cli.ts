@@ -32,7 +32,11 @@ export function resolveCli(pathToClaude: string): CliInfo {
   const exe = process.platform === 'win32' ? 'claude.exe' : 'claude';
   const nativeInstaller = join(homedir(), '.local', 'bin', exe);
   if (isFile(nativeInstaller)) return { path: nativeInstaller, native: true, source: 'native-installer' };
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+  // The gateway may run with a PATH that lacks the npm global bin (started
+  // from a tray launcher or a service), so check its well-known home too.
+  const dirs = (process.env.PATH ?? '').split(delimiter);
+  if (process.platform === 'win32' && process.env.APPDATA) dirs.push(join(process.env.APPDATA, 'npm'));
+  for (const dir of dirs) {
     if (!dir) continue;
     const candidates = [
       join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', exe),
