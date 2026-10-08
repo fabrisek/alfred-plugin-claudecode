@@ -15,12 +15,27 @@ import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample }
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
 import { ToolCallCutter } from './toolCallCutter.js';
+import {
+  ASSISTANT_SLOT,
+  cacheTtlOf,
+  EngineSessions,
+  LiveSession,
+  messageFingerprint,
+  planSession,
+  PushQueue,
+  splitVolatileContext,
+  type EngineSessionRecord,
+  type LiveQuery,
+} from './engineSessions.js';
 
 /** Backend label prefixed to every error this provider surfaces. */
 const LABEL = 'Claude Code';
 
 /** A seat whose CLI said nothing within the request timeout sits out this long. */
 const SILENT_SEAT_BACKOFF_MS = 5 * 60_000;
+
+/** Effort sent when the conversation has no thinking mode of its own. */
+export const DEFAULT_EFFORT = 'high';
 
 /** Separator between a model id and a pinned account id: `opus@seat-3`. */
 export const ACCOUNT_SEPARATOR = '@';
@@ -57,6 +72,12 @@ export type ClaudeCodeProviderOptions = {
   logger?: Logger;
   /** Called after each attempt on a seat, so the host side can refresh its usage. */
   onAccountUsed?: (accountId: string) => void;
+  /**
+   * Where persistent engine sessions keep their records (one Claude Code
+   * session per conversation, see engineSessions.ts). Unset = every request
+   * runs in its own one-shot process.
+   */
+  sessionsDir?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -141,6 +162,8 @@ type QueryOptions = {
   pathToClaudeCodeExecutable?: string;
   canUseTool?: CanUseTool;
   extraArgs?: Record<string, string | null>;
+  /** Continue this Claude Code session (`--resume`). */
+  resume?: string;
 };
 
 // Every built-in Claude Code tool, listed so `disallowedTools` strips them from
@@ -298,9 +321,11 @@ export class ClaudeCodeProvider implements LLMProvider {
   };
 
   private readonly log: Logger;
+  private readonly sessions: EngineSessions | null;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
     this.log = opts.logger ?? noopLogger;
+    this.sessions = opts.sessionsDir ? new EngineSessions(opts.sessionsDir, this.log) : null;
   }
 
   /**
@@ -416,18 +441,22 @@ export class ClaudeCodeProvider implements LLMProvider {
       this.log.warn('dropping message parts this provider cannot carry', { ...built.dropped });
     }
     const tried = new Set<string>();
-    const agent = (req as { metadata?: { agentId?: string } }).metadata?.agentId;
+    const agent = req.metadata?.agentId;
+    // One Claude Code session per conversation: its prompt cache lives on the
+    // seat that served it, so the conversation stays there while it can.
+    const sessionKey = this.sessions ? EngineSessions.keyOf(req) : null;
+    const prefer = sessionKey ? this.sessions?.record(sessionKey)?.accountId : undefined;
 
     for (;;) {
       if (req.signal?.aborted) throw abortError();
-      const pick = this.opts.pool.pick({ model, pinned, exclude: tried });
+      const pick = this.opts.pool.pick({ model, pinned, exclude: tried, prefer });
       if (!pick.account) throw new Error(`${LABEL}: ${pick.reason}`);
       const account = pick.account;
       tried.add(account.id);
 
       let emitted = false;
       try {
-        for await (const chunk of this.attempt(req, model, built, account, agent)) {
+        for await (const chunk of this.attempt(req, model, built, account, agent, sessionKey)) {
           if (chunk.type !== 'done') emitted = true;
           yield chunk;
         }
@@ -467,25 +496,50 @@ export class ClaudeCodeProvider implements LLMProvider {
     return { text, accountId: account.id };
   }
 
-  /** One attempt of `req` on one seat. Throws {@link AccountFailure} on seat-level errors. */
+  /**
+   * One attempt of `req` on one seat. Throws {@link AccountFailure} on seat-level errors.
+   *
+   * Engine-mode turns with a session key run in the conversation's persistent
+   * CLI session (see engineSessions.ts) and send only what is new; a session
+   * lost before any output is retried once as a one-shot request.
+   */
   private async *attempt(
     req: ChatRequest,
     model: string,
     built: BuiltPrompt,
     account: Account,
     agent: string | undefined,
+    sessionKey: string | null = null,
+  ): AsyncIterable<ChatChunk> {
+    try {
+      yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
+    } catch (err) {
+      if (!(err instanceof SessionLost)) throw err;
+      this.log.warn('Claude engine session lost before any output; retrying as a one-shot request', {
+        account: account.id,
+        detail: err.message.slice(0, 200),
+      });
+      yield* this.attemptOnce(req, model, built, account, agent, null);
+    }
+  }
+
+  private async *attemptOnce(
+    req: ChatRequest,
+    model: string,
+    built: BuiltPrompt,
+    account: Account,
+    agent: string | undefined,
+    sessionKey: string | null,
   ): AsyncIterable<ChatChunk> {
     const query = await loadQuery();
     const pool = this.opts.pool;
+    const sessions = this.sessions;
 
     // The SDK owns the child process, so cancellation has to reach it through
     // its own controller. `Deadline` composes the caller's signal with our
     // time-to-first-chunk budget and detaches from `req.signal` on dispose.
     const controller = new AbortController();
     const deadline = new Deadline(req.signal, this.opts.config.requestTimeoutMs, LABEL);
-    const onDeadline = (): void => controller.abort(deadline.signal.reason);
-    if (deadline.signal.aborted) controller.abort(deadline.signal.reason);
-    else deadline.signal.addEventListener('abort', onDeadline, { once: true });
 
     const options: QueryOptions = {
       model,
@@ -507,8 +561,16 @@ export class ClaudeCodeProvider implements LLMProvider {
       env: buildChildEnv(pool, account),
       abortController: controller,
     };
-    if (built.systemPrompt) options.systemPrompt = built.systemPrompt;
+    // The system prompt heads the cached prefix and is shared by every session
+    // of the same agent; its volatile tail (boot notes, open tasks, runtime
+    // line) travels in the first user message instead, as the CLI does with
+    // its own context (system reminders), so it cannot invalidate the head.
+    const system = splitVolatileContext(built.systemPrompt);
+    if (system.stable) options.systemPrompt = system.stable;
+    const fullContent = (): SdkInputBlock[] =>
+      system.volatile ? [{ type: 'text', text: contextReminder(system.volatile) }, ...built.content] : built.content;
     if (this.opts.cli.path) options.pathToClaudeCodeExecutable = this.opts.cli.path;
+    let effort: string | null = null;
     if (this.opts.cli.native) {
       // The deny list above can't keep up with new CLI tools (PowerShell,
       // Skill, ToolSearch, Monitor...): Opus would call one, the CLI denies it
@@ -516,11 +578,103 @@ export class ClaudeCodeProvider implements LLMProvider {
       // `--tools ""` removes every built-in tool, `--strict-mcp-config` drops
       // user MCP servers, `--disable-slash-commands` drops skills.
       options.extraArgs = { tools: '', 'strict-mcp-config': null, 'disable-slash-commands': null };
-      const effort = req.providerOptions?.claudeEffort;
-      if (typeof effort === 'string' && /^(low|medium|high|xhigh|max)$/.test(effort)) {
-        options.extraArgs.effort = effort;
+      // No thinking mode chosen = `high`, explicitly: without `--effort` the
+      // CLI picks its own per-model default, which is not ours to depend on.
+      const e = req.providerOptions?.claudeEffort ?? DEFAULT_EFFORT;
+      if (typeof e === 'string' && /^(low|medium|high|xhigh|max)$/.test(e)) {
+        options.extraArgs.effort = e;
+        effort = e;
       }
     }
+
+    // ---- persistent session: which process, and what to send it ----------
+    // Only with the native CLI: `--tools ""` guarantees a user message gets a
+    // single model call, so a long-lived process never runs an agent loop.
+    const nonSystem = req.messages.filter((m) => m.role !== 'system');
+    let live: LiveSession | undefined;
+    let record: EngineSessionRecord | undefined;
+    let content = fullContent();
+    let sessionMode: 'one-shot' | 'fresh' | 'continue' | 'resume' = 'one-shot';
+    let planReason = '';
+    if (sessionKey && sessions && this.opts.cli.native) {
+      const existing = sessions.getLive(sessionKey);
+      if (!existing?.busy) {
+        const plan = planSession(sessions.record(sessionKey), {
+          accountId: account.id,
+          system: built.systemPrompt,
+          messages: nonSystem,
+        });
+        if (plan.kind === 'continue') {
+          record = sessions.record(sessionKey) as EngineSessionRecord;
+          const delta = buildPrompt(plan.delta).content;
+          content = plan.systemNote ? [{ type: 'text', text: plan.systemNote }, ...delta] : delta;
+          const reusable =
+            existing && existing.accountId === account.id && existing.model === model && existing.effort === effort;
+          if (reusable) {
+            live = existing;
+            sessionMode = 'continue';
+          } else {
+            if (existing) sessions.close(sessionKey, 'model, effort or seat changed');
+            sessionMode = 'resume';
+          }
+        } else {
+          if (existing) sessions.close(sessionKey, `new session: ${plan.reason}`);
+          planReason = plan.reason;
+          record = {
+            key: sessionKey,
+            sessionId: null,
+            accountId: account.id,
+            launchSystem: system.stable,
+            currentSystem: built.systemPrompt,
+            history: [],
+            updatedAt: Date.now(),
+          };
+          sessionMode = 'fresh';
+        }
+        if (!live && !sessions.hasRoom()) {
+          // Every live process is mid-request: serve this one statelessly.
+          sessionMode = 'one-shot';
+          content = fullContent();
+          record = undefined;
+        }
+      }
+    }
+    const persistent = sessionMode !== 'one-shot';
+    if (persistent && !live && sessions && record && sessionKey) {
+      const sessionController = new AbortController();
+      const input = new PushQueue<SdkUserMessage>();
+      const sessionOptions: QueryOptions = { ...options, abortController: sessionController };
+      // A user message gets exactly one model call (no tools), so no turn cap:
+      // `maxTurns` would count across the whole life of the process.
+      delete sessionOptions.maxTurns;
+      // The launch system prompt, not this request's: it heads the cached prefix.
+      if (record.launchSystem) sessionOptions.systemPrompt = record.launchSystem;
+      else delete sessionOptions.systemPrompt;
+      if (sessionMode === 'resume' && record.sessionId) sessionOptions.resume = record.sessionId;
+      const q = query({ prompt: input, options: sessionOptions }) as unknown as LiveQuery;
+      live = new LiveSession(sessionKey, account.id, model, effort, q, input as PushQueue<unknown>, sessionController);
+      sessions.add(live);
+    }
+    if (live) live.busy = true;
+
+    // Stop / time-to-first-chunk. A one-shot process is killed; a persistent
+    // one is interrupted on Stop (the session lives on) and closed on a
+    // silent timeout (it is wedged).
+    let requestAborted = false;
+    const onDeadline = (): void => {
+      requestAborted = true;
+      if (!live) {
+        controller.abort(deadline.signal.reason);
+        return;
+      }
+      if (deadline.userAborted) {
+        void Promise.resolve(live.query.interrupt?.()).catch(() => undefined);
+      } else if (sessions) {
+        sessions.close(live.key, 'no output within the request timeout');
+      }
+    };
+    if (deadline.signal.aborted) onDeadline();
+    else deadline.signal.addEventListener('abort', onDeadline, { once: true });
 
     this.log.info('stream request', {
       model,
@@ -528,7 +682,12 @@ export class ClaudeCodeProvider implements LLMProvider {
       messages: req.messages.length,
       images: built.images,
       // What actually reaches the CLI as `--effort` (absent = CLI default).
-      effort: (options.extraArgs as Record<string, unknown> | undefined)?.effort ?? null,
+      effort,
+      session: sessionMode,
+      ...(planReason ? { sessionReason: planReason } : {}),
+      thread: sessionKey,
+      task: req.session?.task ?? false,
+      sentBlocks: content.length,
     });
 
     let assembledContent = '';
@@ -541,6 +700,9 @@ export class ClaudeCodeProvider implements LLMProvider {
     let sdkError: string | undefined;
     let syntheticText = '';
     let initTools: string[] = [];
+    let sessionId: string | null = null;
+    let gotResult = false;
+    let resultCost: number | undefined;
     // Real model id behind the requested alias (`opus` -> `claude-opus-5-5`),
     // from the init message first, then from each assistant message.
     let servedModel: string | undefined;
@@ -549,8 +711,10 @@ export class ClaudeCodeProvider implements LLMProvider {
     // one SDK `assistant` message per block (same message id), so they are
     // collected until the message ends (`message_stop`), then re-emitted.
     const nativeCalls: Array<{ name: string; input?: unknown }> = [];
-    // Usage of the latest API message, for when the CLI is stopped before
-    // its `result` (re-emitted tool calls, cut replies).
+    // Usage of the latest API message (`message_start`, completed by
+    // `message_delta`): the record of a request stopped before its `result`
+    // (re-emitted tool calls, cut replies), and of every persistent-session
+    // request, whose `result` totals are per process.
     let stepUsage: SdkUsage | undefined;
     // Ends the reply right after its tool call(s) — see toolCallCutter.ts.
     const cutter = new ToolCallCutter();
@@ -582,8 +746,33 @@ export class ClaudeCodeProvider implements LLMProvider {
     };
 
     pool.begin(account.id);
+    let iterator: AsyncIterator<unknown> | undefined;
     try {
-      for await (const message of query({ prompt: oneUserMessage(built.content), options })) {
+      if (live) {
+        live.input.push(oneUser(content));
+        iterator = live.iterator;
+      } else {
+        iterator = query({ prompt: oneUserMessage(content), options })[Symbol.asyncIterator]();
+      }
+      for (;;) {
+        const step = await iterator.next();
+        if (step.done) {
+          if (persistent && !gotResult && !requestAborted) {
+            throw new Error('Claude Code session process ended before its reply');
+          }
+          break;
+        }
+        const message = step.value as SdkMessage;
+        const sid = (message as { session_id?: unknown }).session_id;
+        if (typeof sid === 'string' && sid) sessionId = sid;
+        if (requestAborted && persistent) {
+          // Stop: the interrupt is on its way; nothing more reaches the caller.
+          if (message.type === 'result') {
+            gotResult = true;
+            break;
+          }
+          continue;
+        }
         // Diagnostics for error_max_turns: what the CLI exposed and what the
         // model tried to call.
         const probe = message as { type: string; subtype?: string; tools?: string[]; model?: string; message?: { content?: { type: string; name?: string }[] } };
@@ -598,7 +787,17 @@ export class ClaudeCodeProvider implements LLMProvider {
           // The SDK's message union ends in a catch-all `{ type: string }`, so
           // a discriminant check does not narrow on its own.
           const { event } = message as Extract<SdkMessage, { type: 'stream_event' }>;
-          if (event.type === 'content_block_delta' && 'delta' in event && event.delta) {
+          if (event.type === 'message_start') {
+            // Input side of the request, known before any output: a reply cut
+            // after its tool call never reaches `result`, and was missing from
+            // the seat's token accounting.
+            const startUsage = (event as { message?: { usage?: SdkUsage } }).message?.usage;
+            if (startUsage) {
+              usage = mergeUsage(usage, startUsage);
+              stepUsage = { ...startUsage };
+              sessions?.noteTtl(account.id, cacheTtlOf(startUsage));
+            }
+          } else if (event.type === 'content_block_delta' && 'delta' in event && event.delta) {
             const delta = event.delta as SdkContentDelta;
             if (delta.type === 'text_delta') {
               const text = (delta as SdkTextDelta).text ?? '';
@@ -632,7 +831,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             if (md.delta?.stop_reason) finishReason = mapStopReason(md.delta.stop_reason);
             if (md.usage) {
               usage = mergeUsage(usage, md.usage);
-              stepUsage = md.usage;
+              stepUsage = { ...stepUsage, ...md.usage };
             }
           } else if (event.type === 'message_stop' && nativeCalls.length > 0) {
             const markup = renderNativeCalls(nativeCalls);
@@ -695,8 +894,15 @@ export class ClaudeCodeProvider implements LLMProvider {
             nativeCalls.push(...calls.map((c) => ({ name: c.name, input: c.input })));
           }
         } else if (message.type === 'result') {
+          gotResult = true;
           const rm = message as Extract<SdkMessage, { type: 'result' }>;
-          if (rm.usage) {
+          if (persistent) {
+            // Per-process totals: this request's share is the difference.
+            if (typeof rm.total_cost_usd === 'number' && live) {
+              resultCost = Math.max(0, rm.total_cost_usd - live.costSoFar);
+              live.costSoFar = rm.total_cost_usd;
+            }
+          } else if (rm.usage) {
             usage = mergeUsage(usage, rm.usage);
             tokens = {
               input: rm.usage.input_tokens ?? 0,
@@ -718,6 +924,7 @@ export class ClaudeCodeProvider implements LLMProvider {
               initTools: initTools.slice(0, 40),
               toolUses,
               contentChars: assembledContent.length,
+              session: sessionMode,
             });
             const detail =
               syntheticText.trim() || rm.result || rm.errors?.join('; ') || rm.subtype || 'unknown error';
@@ -730,6 +937,8 @@ export class ClaudeCodeProvider implements LLMProvider {
               throw failure;
             }
           }
+          // A persistent process stays up after its reply.
+          if (persistent) break;
         }
       }
       if (/<\/?(?:[a-z]+:)?(?:invoke|function_calls|parameter)\b/.test(rawText)) {
@@ -752,10 +961,18 @@ export class ClaudeCodeProvider implements LLMProvider {
         // The rest of this generation is the model talking to itself; stop
         // the CLI rather than paying for it.
         this.log.info('reply ended after its tool call', { account: account.id, model });
-        try {
-          controller.abort();
-        } catch {
-          // already gone
+        if (live && !gotResult) {
+          // Interrupt the turn but keep the process: the session keeps what
+          // was generated up to here, and receives the tool results next.
+          gotResult = await this.interruptTurn(live, iterator, (u) => {
+            stepUsage = { ...stepUsage, ...u };
+          });
+        } else if (!live) {
+          try {
+            controller.abort();
+          } catch {
+            // already gone
+          }
         }
       } else {
         const rest = cutter.flush();
@@ -766,7 +983,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       }
     } catch (err) {
       if (err instanceof AccountFailure) throw err;
-      if (isAbortLike(err) || controller.signal.aborted) {
+      if (isAbortLike(err) || controller.signal.aborted || (persistent && requestAborted)) {
         // User pressed Stop, or our own time-to-first-chunk budget fired. The
         // host contract requires exactly one `done`. A timeout that produced
         // nothing at all is still a failure, so it is reported as one.
@@ -792,25 +1009,71 @@ export class ClaudeCodeProvider implements LLMProvider {
       // The SDK throws on a non-zero CLI exit; its message carries the reason.
       const detail = (err instanceof Error ? err.message : String(err)) + (syntheticText ? ` ${syntheticText}` : '');
       const failure = fail(detail);
+      if (persistent && !failure.switchable && assembledContent.length === 0 && !assembledThinking) {
+        // The session's process went away (crash, killed, bad resume): the
+        // caller retries once without it.
+        failed = { outcome: 'switched', detail };
+        throw new SessionLost(detail);
+      }
       failed = { outcome: failure.switchable && !assembledContent ? 'switched' : 'error', detail };
       if (failure.switchable) throw failure;
       throw err instanceof Error ? err : new Error(String(err));
     } finally {
       // Also runs when the consumer breaks out of the loop early, which is what
       // detaches our listener from the host's long-lived abort signal.
+      deadline.signal.removeEventListener('abort', onDeadline);
       deadline.dispose();
+      if (!live && iterator && !gotResult) {
+        // One-shot process left mid-stream: make sure it is gone.
+        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+      }
+      if (live && sessions && record) {
+        if (failed || !gotResult) {
+          // Unknown state: the next request starts a fresh session.
+          sessions.close(live.key, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
+          sessions.forget(live.key);
+        } else {
+          record.sessionId = sessionId ?? record.sessionId;
+          record.accountId = account.id;
+          record.currentSystem = built.systemPrompt;
+          record.history = [
+            ...nonSystem.map((m) => (m.role === 'assistant' ? ASSISTANT_SLOT : messageFingerprint(m))),
+            ASSISTANT_SLOT,
+          ];
+          sessions.save(record);
+          const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0;
+          if (req.session?.task && (requestAborted || !calledTool || TASK_END_CALL.test(rawText))) {
+            // A sub-agent that answered (or was stopped) has finished its
+            // task: nothing will feed this process again. Its record stays,
+            // so a later message to that thread resumes the same session.
+            sessions.close(live.key, requestAborted ? 'sub-agent stopped' : 'sub-agent finished');
+          } else {
+            sessions.release(live);
+          }
+        }
+      }
       if (!tokens && stepUsage) {
-        // Stopped before the `result` (which carries the totals): the last
-        // API message's usage is the best record of what this cost.
+        // Stopped before the `result` (which carries the totals), or a
+        // persistent session: the API message's own usage is the record.
         tokens = {
           input: stepUsage.input_tokens ?? 0,
           output: stepUsage.output_tokens ?? 0,
           cacheRead: stepUsage.cache_read_input_tokens ?? 0,
           cacheWrite: stepUsage.cache_creation_input_tokens ?? 0,
-          costUsd: 0,
+          costUsd: resultCost ?? 0,
         };
       }
-      if (!failed) this.log.info('stream served', { model, servedModel, account: account.id });
+      if (!failed) {
+        this.log.info('stream served', {
+          model,
+          servedModel,
+          account: account.id,
+          session: sessionMode,
+          sessionId,
+          cacheRead: stepUsage?.cache_read_input_tokens,
+          cacheWrite: stepUsage?.cache_creation_input_tokens,
+        });
+      }
       pool.end(account.id, {
         model,
         servedModel,
@@ -824,7 +1087,70 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     yield { type: 'done', response: buildResponse() };
   }
+
+  /**
+   * Interrupt the running turn of a persistent session and wait for its
+   * `result`, so the next request starts on an idle process. Returns false
+   * (the caller then drops the session) when the process does not settle.
+   */
+  private async interruptTurn(
+    live: LiveSession,
+    iterator: AsyncIterator<unknown>,
+    onUsage: (u: SdkUsage) => void,
+  ): Promise<boolean> {
+    try {
+      await live.query.interrupt?.();
+    } catch {
+      return false;
+    }
+    const settle = (async (): Promise<boolean> => {
+      for (;;) {
+        const step = await iterator.next();
+        if (step.done) return false;
+        const m = step.value as SdkMessage;
+        if (m.type === 'result') return true;
+        if (m.type === 'stream_event') {
+          const ev = (m as Extract<SdkMessage, { type: 'stream_event' }>).event;
+          if (ev.type === 'message_delta') {
+            const u = (ev as Extract<SdkStreamEvent, { type: 'message_delta' }>).usage;
+            if (u) onUsage(u);
+          }
+        }
+      }
+    })().catch(() => false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), INTERRUPT_SETTLE_MS);
+    });
+    try {
+      return await Promise.race([settle, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Close every live engine session (plugin deactivation). */
+  dispose(): void {
+    this.sessions?.dispose();
+  }
 }
+
+/** The persistent session's process went away before producing anything. */
+class SessionLost extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionLost';
+  }
+}
+
+/**
+ * A delegated sub-agent ends its task with `task_complete` / `task_blocked`,
+ * in any of the call spellings the cutter accepts.
+ */
+const TASK_END_CALL = /(?:"name"\s*:\s*"|invoke name="|invoke_)task_(?:complete|blocked)\b/;
+
+/** How long an interrupted turn may take to report its `result`. */
+const INTERRUPT_SETTLE_MS = 15_000;
 
 /** Native tool calls re-emitted as the `<tool_call>` markup Alfred parses. */
 function renderNativeCalls(calls: Array<{ name: string; input?: unknown }>): string {
@@ -858,13 +1184,17 @@ function textOf(content: SdkContentBlock[] | undefined): string {
     .join('');
 }
 
+/** The volatile tail of Alfred's system prompt, as the CLI frames its own injected context. */
+function contextReminder(volatile: string): string {
+  return `<system-reminder>\nCurrent context from Alfred (it may change between turns):\n\n${volatile}\n</system-reminder>`;
+}
+
+function oneUser(content: SdkInputBlock[]): SdkUserMessage {
+  return { type: 'user', session_id: '', parent_tool_use_id: null, message: { role: 'user', content } };
+}
+
 async function* oneUserMessage(content: SdkInputBlock[]): AsyncIterable<SdkUserMessage> {
-  yield {
-    type: 'user',
-    session_id: '',
-    parent_tool_use_id: null,
-    message: { role: 'user', content },
-  };
+  yield oneUser(content);
 }
 
 /**
@@ -978,6 +1308,11 @@ function imageBlocks(msg: Message, dropped: DroppedParts): SdkImageBlock[] {
  * rendered as a labelled transcript so every prior turn is preserved, with
  * each turn's images inserted as image blocks right after its text.
  *
+ * Each message is its own text block. The API caches a prompt prefix up to a
+ * block boundary: with the whole transcript in one growing block, the next
+ * request never shared a boundary with the previous one and every request
+ * re-wrote the entire history into the cache.
+ *
  * An assistant turn's `toolCalls` are re-rendered as the same
  * `<tool_call>{…}</tool_call>` markup Alfred's prompt-encoded protocol uses on
  * the way out, so the model sees what it asked for and the tool result that
@@ -987,13 +1322,7 @@ export function buildPrompt(messages: Message[]): BuiltPrompt {
   const systemParts: string[] = [];
   const content: SdkInputBlock[] = [];
   const dropped: DroppedParts = { images: 0, attachments: 0 };
-  let pendingText: string[] = [];
   let images = 0;
-  const flush = (): void => {
-    if (pendingText.length === 0) return;
-    content.push({ type: 'text', text: pendingText.join('\n\n') });
-    pendingText = [];
-  };
   for (const msg of messages) {
     const text = msg.content ?? '';
     if (msg.role === 'system') {
@@ -1001,15 +1330,13 @@ export function buildPrompt(messages: Message[]): BuiltPrompt {
       continue;
     }
     const body = [text, renderToolCalls(msg)].filter((p) => p.length > 0).join('\n');
-    pendingText.push(`${roleLabel(msg)}:\n${body}`);
+    content.push({ type: 'text', text: `${roleLabel(msg)}:\n${body}` });
     const blocks = imageBlocks(msg, dropped);
     if (blocks.length > 0) {
-      flush();
       content.push(...blocks);
       images += blocks.length;
     }
   }
-  flush();
   if (content.length === 0) content.push({ type: 'text', text: 'User:\n' });
   return {
     systemPrompt: systemParts.join('\n\n').trim(),

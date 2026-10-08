@@ -209,6 +209,7 @@ let refresher: UsageRefresher | null = null;
 let poolRef: AccountPool | null = null;
 let runnerRef: SessionRunner | null = null;
 let adapterRef: ClaudeSessionAdapter | null = null;
+let providerRef: ClaudeCodeProvider | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
@@ -250,6 +251,8 @@ const plugin: AlfredPlugin = {
       cli,
       logger: ctx.logger,
       onAccountUsed: (id: string) => usage.soon(id),
+      // One persistent Claude Code session per conversation (engine mode).
+      sessionsDir: join(ctx.dataDir, 'engine-sessions'),
     };
     let provider: ClaudeCodeProvider;
     if (chatCfg.cliMode) {
@@ -267,6 +270,7 @@ const plugin: AlfredPlugin = {
     } else {
       provider = new ClaudeCodeProvider(providerOpts);
     }
+    providerRef = provider;
     // What runs on Claude right now, for the panel (webview/activity.ts).
     const activity = new ActivityBoard({ seatLabel: (id) => pool.get(id)?.label });
     instrumentProvider(provider, activity, pool);
@@ -523,6 +527,8 @@ const plugin: AlfredPlugin = {
   },
 
   deactivate() {
+    providerRef?.dispose();
+    providerRef = null;
     adapterRef?.killAll();
     adapterRef = null;
     runnerRef?.cancelAll();

@@ -190,7 +190,8 @@ export function registerSessionTools(ctx: PluginContext, runner: SessionRunner):
         cwd: where.cwd,
         prompt,
         model,
-        effort: effort || undefined,
+        // No effort asked = `high`, as engine turns (DEFAULT_EFFORT).
+        effort: effort || 'high',
         permissionMode: mode,
         sessionId,
         maxTurns,

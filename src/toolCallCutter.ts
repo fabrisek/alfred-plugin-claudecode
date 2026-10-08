@@ -89,6 +89,11 @@ export class ToolCallCutter {
    */
   private holding = false;
 
+  /** Tool calls closed so far in this reply (0 = a plain answer). */
+  get callCount(): number {
+    return this.calls;
+  }
+
   push(delta: string): CutterOutput {
     if (this.stopped || !delta) return { text: '', stop: this.stopped };
     this.all += delta;

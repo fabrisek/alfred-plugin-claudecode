@@ -471,7 +471,9 @@ export class ClaudeSessionAdapter {
         message: `"${toolName}" needs approval, which this conversation's permission mode (${mode}) does not grant. Tell the user; they can raise the mode for this conversation.`,
       });
     }
-    if (req.effort && EFFORT_LEVELS.includes(req.effort) && cli.native) options.effort = req.effort;
+    // No thinking mode chosen = `high`, as engine turns: never the CLI's own default.
+    const effort = req.effort ?? 'high';
+    if (EFFORT_LEVELS.includes(effort) && cli.native) options.effort = effort;
     const mcp = req.mcpServers ?? [];
     if (mcp.length) {
       options.mcpServers = Object.fromEntries(

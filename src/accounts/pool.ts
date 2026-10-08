@@ -607,7 +607,7 @@ export class AccountPool {
    *
    * A pinned seat is tried first when usable; otherwise the pool takes over.
    */
-  pick(args: { model: string; pinned?: string; exclude?: Set<string> }): PickResult {
+  pick(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string }): PickResult {
     const now = this.now();
     const { threshold, strategy } = this.state.settings;
     const exclude = args.exclude ?? new Set<string>();
@@ -618,6 +618,16 @@ export class AccountPool {
       if (pinned) return { account: pinned };
     }
     if (usable.length === 0) return { reason: this.exhaustedMessage(args.model, exclude, now) };
+
+    // Seat affinity: a conversation's prompt cache lives on the seat that
+    // served it, so it stays there while that seat is under the threshold.
+    // In-flight caps are about spreading different conversations, not this one.
+    if (args.prefer) {
+      const sticky = usable.find((a) => a.id === args.prefer);
+      if (sticky && relevantPercent(this.runtime(sticky.id).usage, args.model, now) < threshold) {
+        return { account: sticky };
+      }
+    }
 
     const scored = usable.map((a) => ({
       a,

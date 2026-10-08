@@ -271,13 +271,33 @@ describe('prompt building', () => {
     ] as never);
     assert.equal(built.systemPrompt, 'SYS');
     assert.equal(built.images, 2);
+    // One text block per message, each message's images right after it: the
+    // prompt cache can only match a previous request at a block boundary.
     const kinds = built.content.map((b) => b.type);
-    assert.deepEqual(kinds, ['text', 'image', 'text', 'image']);
-    const second = (built.content[2] as { text: string }).text;
-    assert.match(second, /<tool_call>\n\{"name":"read","arguments":\{"p":1\}\}\n<\/tool_call>/);
-    assert.match(second, /Tool result \(read\):\nRESULT/);
-    assert.match(second, /User:\nand this$/);
-    assert.equal((built.content[3] as { source: { media_type: string } }).source.media_type, 'image/jpeg');
+    assert.deepEqual(kinds, ['text', 'image', 'text', 'text', 'text', 'image']);
+    const text = (i: number) => (built.content[i] as { text: string }).text;
+    assert.equal(text(0), 'User:\nlook');
+    assert.match(text(2), /^Assistant:\n<tool_call>\n\{"name":"read","arguments":\{"p":1\}\}\n<\/tool_call>$/);
+    assert.equal(text(3), 'Tool result (read):\nRESULT');
+    assert.equal(text(4), 'User:\nand this');
+    assert.equal((built.content[5] as { source: { media_type: string } }).source.media_type, 'image/jpeg');
+  });
+
+  it('keeps every earlier block identical when the conversation grows (cache prefix)', () => {
+    const base = [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'do it' },
+      { role: 'assistant', content: 'x', toolCalls: [{ id: '1', name: 'ls', arguments: {} }] },
+      { role: 'tool', name: 'ls', content: 'a b c' },
+    ];
+    const first = buildPrompt(base as never).content;
+    const next = buildPrompt([
+      ...base,
+      { role: 'assistant', content: '', toolCalls: [{ id: '2', name: 'ls', arguments: { p: 'a' } }] },
+      { role: 'tool', name: 'ls', content: 'd' },
+    ] as never).content;
+    assert.deepEqual(next.slice(0, first.length), first);
+    assert.equal(next.length, first.length + 2);
   });
 });
 
