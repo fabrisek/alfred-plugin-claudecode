@@ -471,6 +471,8 @@ export class ClaudeCodeProvider implements LLMProvider {
     let rejectedUntil: number | null = null;
     let sdkError: string | undefined;
     let syntheticText = '';
+    let initTools: string[] = [];
+    const toolUses: string[] = [];
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
 
@@ -495,6 +497,13 @@ export class ClaudeCodeProvider implements LLMProvider {
     pool.begin(account.id);
     try {
       for await (const message of query({ prompt: oneUserMessage(built.content), options })) {
+        // Diagnostics for error_max_turns: what the CLI exposed and what the
+        // model tried to call.
+        const probe = message as { type: string; subtype?: string; tools?: string[]; message?: { content?: { type: string; name?: string }[] } };
+        if (probe.type === 'system' && probe.subtype === 'init') initTools = probe.tools ?? [];
+        if (probe.type === 'assistant') {
+          for (const b of probe.message?.content ?? []) if (b.type === 'tool_use' && b.name) toolUses.push(b.name);
+        }
         if (message.type === 'stream_event') {
           // The SDK's message union ends in a catch-all `{ type: string }`, so
           // a discriminant check does not narrow on its own.
@@ -571,6 +580,14 @@ export class ClaudeCodeProvider implements LLMProvider {
           const errored =
             rm.is_error || rm.subtype === 'error_max_turns' || rm.subtype === 'error_during_execution';
           if (errored || sdkError) {
+            this.log.warn('request failed', {
+              account: account.id,
+              subtype: rm.subtype,
+              numTurns: (rm as { num_turns?: number }).num_turns,
+              initTools: initTools.slice(0, 40),
+              toolUses,
+              contentChars: assembledContent.length,
+            });
             const detail =
               syntheticText.trim() || rm.result || rm.errors?.join('; ') || rm.subtype || 'unknown error';
             const failure = fail(detail);
