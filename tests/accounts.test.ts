@@ -294,6 +294,23 @@ describe('provider failover', () => {
     assert.equal((seen.content?.[1] as { type: string }).type, 'image');
     __setQueryForTests(null);
   });
+
+  it('reports the served model behind an alias and remembers it', async () => {
+    const pool = makePool(1);
+    const served = {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'hi' }], model: 'claude-opus-5-5' },
+    };
+    __setQueryForTests(fakeRun({ 'tok-1': [textDelta('hi'), served, okResult] }, []));
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger });
+    assert.equal((await p.listModels())[0].displayName, 'Claude Opus (latest)');
+    const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(res.usage?.servedModel, 'claude-opus-5-5');
+    assert.equal(pool.recent[0].servedModel, 'claude-opus-5-5');
+    assert.equal(pool.servedModelOf('opus'), 'claude-opus-5-5');
+    assert.equal((await p.listModels())[0].displayName, 'Claude Opus (claude-opus-5-5)');
+    __setQueryForTests(null);
+  });
 });
 
 describe('dashboard', () => {

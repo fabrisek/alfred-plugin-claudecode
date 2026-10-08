@@ -329,7 +329,9 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    const base = parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id);
+    const base = parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id).map(
+      (m) => withServedModel(m, this.opts.pool.servedModelOf(m.id)),
+    );
     const pinned: ModelInfo[] = [];
     for (const account of this.opts.pool.pinnableAccounts()) {
       for (const m of base) {
@@ -483,6 +485,9 @@ export class ClaudeCodeProvider implements LLMProvider {
     let sdkError: string | undefined;
     let syntheticText = '';
     let initTools: string[] = [];
+    // Real model id behind the requested alias (`opus` -> `claude-opus-5-5`),
+    // from the init message first, then from each assistant message.
+    let servedModel: string | undefined;
     const toolUses: string[] = [];
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
@@ -491,7 +496,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       content: assembledContent.trim(),
       thinking: assembledThinking.trim() || undefined,
       finishReason,
-      usage,
+      usage: servedModel ? { ...usage, servedModel } : usage,
     });
     const fail = (detail: string): AccountFailure => {
       const c = classifyFailure(detail, sdkError, rejectedUntil);
@@ -510,8 +515,11 @@ export class ClaudeCodeProvider implements LLMProvider {
       for await (const message of query({ prompt: oneUserMessage(built.content), options })) {
         // Diagnostics for error_max_turns: what the CLI exposed and what the
         // model tried to call.
-        const probe = message as { type: string; subtype?: string; tools?: string[]; message?: { content?: { type: string; name?: string }[] } };
-        if (probe.type === 'system' && probe.subtype === 'init') initTools = probe.tools ?? [];
+        const probe = message as { type: string; subtype?: string; tools?: string[]; model?: string; message?: { content?: { type: string; name?: string }[] } };
+        if (probe.type === 'system' && probe.subtype === 'init') {
+          initTools = probe.tools ?? [];
+          if (typeof probe.model === 'string' && probe.model) servedModel = probe.model;
+        }
         if (probe.type === 'assistant') {
           for (const b of probe.message?.content ?? []) if (b.type === 'tool_use' && b.name) toolUses.push(b.name);
         }
@@ -559,6 +567,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             syntheticText += textOf(am.message.content);
             continue;
           }
+          if (typeof am.message.model === 'string' && am.message.model) servedModel = am.message.model;
           // Fallback: if partial streaming yielded nothing, reconstruct from the
           // complete assistant message.
           if (!sawStreamedText) {
@@ -610,6 +619,8 @@ export class ClaudeCodeProvider implements LLMProvider {
           if (errored || sdkError) {
             this.log.warn('request failed', {
               account: account.id,
+              model,
+              servedModel,
               subtype: rm.subtype,
               numTurns: (rm as { num_turns?: number }).num_turns,
               initTools: initTools.slice(0, 40),
@@ -655,8 +666,10 @@ export class ClaudeCodeProvider implements LLMProvider {
       // Also runs when the consumer breaks out of the loop early, which is what
       // detaches our listener from the host's long-lived abort signal.
       deadline.dispose();
+      if (!failed) this.log.info('stream served', { model, servedModel, account: account.id });
       pool.end(account.id, {
         model,
+        servedModel,
         outcome: failed?.outcome ?? 'ok',
         agent,
         tokens,
@@ -714,6 +727,17 @@ const ALIAS_DISPLAY: Record<string, string> = {
   haiku: 'Claude Haiku (latest)',
   fable: 'Claude Fable (latest)',
 };
+
+/**
+ * Shows which real model an alias currently runs: `Claude Opus (latest)` ->
+ * `Claude Opus (claude-opus-5-5)`. Learned from served requests, so unknown
+ * until an alias has answered once.
+ */
+export function withServedModel(model: ModelInfo, served: string | undefined): ModelInfo {
+  if (!served || served === model.id) return model;
+  const base = (model.displayName ?? model.id).replace(/\s*\(latest\)$/, '');
+  return { ...model, displayName: `${base} (${served})` };
+}
 
 /** Fallback catalog when the config string is empty. Keep in step with the
  *  manifest's `models` default and with {@link ALIAS_DISPLAY}. */

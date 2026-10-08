@@ -99,6 +99,8 @@ export type ServedRecord = {
   detail?: string;
   /** `session` for a full Claude Code agent run (`claude_code_run`); absent for a chat completion. */
   kind?: 'session';
+  /** Model id the API actually served (e.g. `claude-opus-5-5`) when `model` is an alias. */
+  servedModel?: string;
 };
 
 type StateFile = {
@@ -108,6 +110,8 @@ type StateFile = {
   settings: PoolSettings;
   recent: ServedRecord[];
   tokens: Record<string, TokenLedger>;
+  /** Last real model id each requested model (alias) resolved to. */
+  servedModels?: Record<string, string>;
 };
 
 type SecretsFile = { tokens: Record<string, string> };
@@ -174,6 +178,8 @@ export class AccountPool {
         settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
         recent: Array.isArray(raw.recent) ? raw.recent : [],
         tokens: raw.tokens && typeof raw.tokens === 'object' ? raw.tokens : {},
+        servedModels:
+          raw.servedModels && typeof raw.servedModels === 'object' ? raw.servedModels : {},
       };
     } catch {
       // First run: the login the plugin has always used becomes account #1, so
@@ -281,6 +287,11 @@ export class AccountPool {
 
   get recent(): ServedRecord[] {
     return this.state.recent;
+  }
+
+  /** Real model id `model` (usually an alias like `opus`) last resolved to, if known. */
+  servedModelOf(model: string): string | undefined {
+    return this.state.servedModels?.[model];
   }
 
   add(label: string, auth: AuthKind): Account {
@@ -450,6 +461,9 @@ export class AccountPool {
       rt.lastError = { message: record.detail, at: this.now() };
     }
     if (record.tokens) this.recordTokens(id, record.tokens);
+    if (record.outcome === 'ok' && record.servedModel && record.servedModel !== record.model) {
+      (this.state.servedModels ??= {})[record.model] = record.servedModel;
+    }
     this.state.recent.unshift({ at: this.now(), accountId: id, ...record });
     if (this.state.recent.length > RECENT_MAX) this.state.recent.length = RECENT_MAX;
     this.touch();

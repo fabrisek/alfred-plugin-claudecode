@@ -183,7 +183,7 @@ function render() {
     + '<span title="' + esc(tallyTitle('Total', t.total)) + '">' + fmtTokens(sumTally(t.total)) + '</span></td><td></td><td></td></tr>';
   open.forEach((id) => { const r = $(id); if (r) r.classList.add('on'); });
   $('recent').innerHTML = snap.recent.slice(0, 6).map((r) =>
-    '<tr><td class="mono">' + esc(clock(r.at)) + '</td><td>' + esc(r.accountLabel) + '</td><td class="mono">' + esc(r.model) + (r.kind === 'session' ? ' <span class="pill info" title="Claude Code agent session (claude_code_run)">session</span>' : '') + '</td>'
+    '<tr><td class="mono">' + esc(clock(r.at)) + '</td><td>' + esc(r.accountLabel) + '</td><td class="mono">' + esc(r.model) + (r.servedModel && r.servedModel !== r.model ? ' &rarr; ' + esc(r.servedModel) : '') + (r.kind === 'session' ? ' <span class="pill info" title="Claude Code agent session (claude_code_run)">session</span>' : '') + '</td>'
     + '<td>' + (r.agent ? esc(r.agent) : '') + '</td>'
     + '<td class="small">' + (r.tokens ? fmtTokens(r.tokens.input + r.tokens.cacheRead + r.tokens.cacheWrite) + ' in \\u00b7 ' + fmtTokens(r.tokens.output) + ' out' : '') + '</td>'
     + '<td><span class="pill ' + (r.outcome === 'ok' ? 'ok' : r.outcome === 'switched' ? 'warn' : 'err') + '">' + esc(r.outcome) + '</span></td>'
