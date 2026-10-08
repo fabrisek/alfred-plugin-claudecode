@@ -16,6 +16,7 @@ import {
 } from './accounts/cli.js';
 import { fetchUsage, readCredentials } from './accounts/usage.js';
 import { createDashboardWebview } from './webview/dashboard.js';
+import { ActivityBoard, instrumentProvider, runItem, type ActivityItem } from './webview/activity.js';
 import {
   DEFAULT_SESSION_TOOLS,
   SessionRunner,
@@ -266,6 +267,9 @@ const plugin: AlfredPlugin = {
     } else {
       provider = new ClaudeCodeProvider(providerOpts);
     }
+    // What runs on Claude right now, for the panel (webview/activity.ts).
+    const activity = new ActivityBoard({ seatLabel: (id) => pool.get(id)?.label });
+    instrumentProvider(provider, activity);
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
 
@@ -300,7 +304,25 @@ const plugin: AlfredPlugin = {
 
     ctx.registerAction(
       'poolSnapshot',
-      safe(() => snapshot(pool, cli)),
+      safe(() => {
+        const now = Date.now();
+        const runs = runner
+          .list()
+          .map((r) => runItem(r, now))
+          .filter((r): r is ActivityItem => r !== undefined);
+        return { ...snapshot(pool, cli), activity: activity.view(runs) };
+      }),
+    );
+
+    // Stop a live conversation turn (graceful interrupt) or a claude_code_run session.
+    ctx.registerAction(
+      'stopActivity',
+      safe(async (args) => {
+        const id = String((args as { id?: unknown } | undefined)?.id ?? '');
+        const stopped = id.startsWith('run:') ? runner.cancel(id.slice(4)) : await activity.stop(id);
+        if (!stopped) throw new Error('Nothing running under this id any more.');
+        return {};
+      }),
     );
 
     ctx.registerAction(
