@@ -97,6 +97,8 @@ export type ServedRecord = {
   agent?: string;
   tokens?: TokenSample;
   detail?: string;
+  /** `session` for a full Claude Code agent run (`claude_code_run`); absent for a chat completion. */
+  kind?: 'session';
 };
 
 type StateFile = {

@@ -13,6 +13,8 @@ inference runs against your subscription quota, exactly like the `claude` CLI.
   `permissionMode: 'dontAsk'`, plus a `canUseTool` deny-all callback, and
   `settingSources: []`. Claude runs **no tools** and never touches your
   filesystem — it just returns model text.
+  (Coding work with real tools goes through the separate `claude_code_run`
+  tool, see *Delegated Claude Code sessions*.)
 - Streams token-by-token (`includePartialMessages`), including extended
   thinking.
 - `capabilities.tools = false` → Alfred falls back to its **prompt-encoded
@@ -139,6 +141,64 @@ cache read, cache write) and Claude Code's API-equivalent `total_cost_usd`
 hourly buckets for 8 days, from which the page shows the current 5h window,
 current week and total; plus the last 50 requests.
 
+## Delegated Claude Code sessions
+
+The provider above uses Claude as a bare LLM. The plugin also registers three
+**tools** that let an Alfred agent hand a real coding task to a full Claude
+Code agent session — its own Read / Edit / Write / Bash / Grep / ... tools —
+running in a project directory on a seat from the pool.
+
+| Tool | What it does |
+| --- | --- |
+| `claude_code_run` | `{ prompt, cwd \| project, model?, effort?, permissionMode?, sessionId?, maxTurns?, background? }`. Runs the session and returns its final report, the files it changed, the shell commands it ran, refused tool calls, tokens and API-equivalent cost, the seat used and the `sessionId`. |
+| `claude_code_status` | `{ runId?, waitSeconds? }`. Progress so far or the final report of a run; `waitSeconds` (max 25) waits for it to finish first. Without `runId`, lists recent runs. |
+| `claude_code_cancel` | `{ runId }`. Stops a running session (edits already made stay on disk). |
+
+- **Where**: `cwd` is an absolute directory. `project` is either a mount name
+  the agent can see (read-only mounts are refused) or an Alfred project id /
+  name with a workspace path (`ctx.projects`).
+- **What the session is**: the Agent SDK `query()` with Claude Code's own
+  system prompt (`preset: 'claude_code'`), `settingSources: user, project,
+  local` (so the project's `CLAUDE.md` and settings apply, like a session
+  started by hand there), the seat's isolated env (same `buildChildEnv` as the
+  provider), and the installed CLI when found.
+- **Permissions**: setting **Session permission mode** (default
+  `acceptEdits`) is the most permissive mode a call may use; a call can ask
+  for less (`plan`), never more. `bypassPermissions` is available as a setting
+  value, not the default. Tools in **Session allowed tools** run without
+  asking; anything else is refused by a `canUseTool` callback (a permission
+  prompt would hang a headless CLI).
+- **Seats**: a new session picks its seat like a chat request (fill / spread)
+  and moves to the next seat if the first one is out of quota or logged out
+  before the session produced anything. Every run is its own CLI process with
+  its own abort controller; runs share nothing mutable but the pool.
+- **Resume**: `sessionId` continues an earlier session. The transcript lives in
+  the owning seat's `CLAUDE_CONFIG_DIR` (`projects/<cwd>/<id>.jsonl`), so the
+  resume is **pinned to that seat**: the plugin records the owner of every
+  session it starts (`state/sessions.json`) and otherwise finds it by looking
+  for the transcript in each seat's dir (sessions started by hand in a
+  terminal work too). **If the owner seat is exhausted the call fails at once**
+  with code `unavailable`, the reset time, and the advice to retry later or
+  start a new session with a summary. No silent fallback: another seat cannot
+  see the transcript, so it would start a different conversation while
+  claiming to continue this one; the calling agent has the context to write
+  that summary itself.
+- **Ledger**: each run is one entry in the seat's token ledger
+  (`result.usage` totals for the whole session, `total_cost_usd`), live
+  `rate_limit_event`s update the seat's usage, and the run appears in the
+  dashboard's recent requests with a **session** marker and the calling agent.
+- **Long runs**: the tool declares `longRunning` (waives the chat layer's 30 s
+  per-tool cap, host protocol ≥ 1.6.0) and `timeoutMs` = session timeout +
+  2 min for the worker RPC, so the session's own wall-clock timeout (setting,
+  default 30 min) always fires first. While blocking it streams progress
+  (assistant text and one `> Tool target` line per tool call) through
+  `emitProgress`. `background: true` returns a `runId` at once instead; poll
+  `claude_code_status`. Runs are kept in memory (2 h / 30 finished runs) and
+  are cancelled when the plugin unloads.
+- **Not tracked**: files changed by shell commands (`rm`, `git checkout`, code
+  generators) are not in the "files changed" list, only Edit / Write /
+  MultiEdit / NotebookEdit calls whose result succeeded.
+
 ## Configuration
 
 | Setting | Default | Notes |
@@ -148,6 +208,11 @@ current week and total; plus the last 50 requests.
 | Context window | `200000` | Reported per model for the UI context gauge. |
 | Request timeout | `120000` | Time to first output, per seat attempt. |
 | Path to claude | *(empty)* | Empty = auto-detect the installed native CLI (`~/.local/bin`, or the npm global package's `bin/claude.exe`), else the SDK's bundled `cli.js` (no live usage, no effort control). |
+| Session permission mode | `acceptEdits` | `plan`, `acceptEdits` or `bypassPermissions`; ceiling for `claude_code_run`. |
+| Session allowed tools | dev set | Comma-separated tools a session may use without asking (`Bash(npm test:*)` rules work). |
+| Session default model | *(empty)* | Empty = first catalog model. |
+| Session timeout | `1800000` | Wall clock per session; the tool's host timeout derives from it (reload the plugin after changing). |
+| Session max turns | `200` | Default turn cap; a call may pass `maxTurns`. |
 
 Strategy, threshold and poll interval live on the Claude accounts page.
 
@@ -160,9 +225,11 @@ In **Settings → Plugins → Claude (subscription)**:
 2. Then run **testConnection** (`{ accountId }` optional, also the **Test**
    button per seat) — a tiny real completion on that seat.
 
-Tests: `node --import <alfred-agent>/node_modules/tsx/dist/esm/index.mjs --test tests/accounts.test.ts`
+Tests: `node --import <alfred-agent>/node_modules/tsx/dist/esm/index.mjs --test tests/accounts.test.ts tests/session.test.ts`
 (no network). `tests/live-smoke.ts` runs one tiny real request on the default
-login; `tests/probe-usage.mjs` prints the raw usage response (never the token).
+login; `tests/session-smoke.ts` runs one tiny real session (haiku creates a
+file in a throwaway dir, then a resume asks about it) and removes the dir and
+its transcript; `tests/probe-usage.mjs` prints the raw usage response (never the token).
 
 ## Limitations
 

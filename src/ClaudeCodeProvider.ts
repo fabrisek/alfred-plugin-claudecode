@@ -167,14 +167,14 @@ const denyAllTools: CanUseTool = async (toolName) => ({
   message: `Tool "${toolName}" is disabled — this provider runs in text-only completion mode.`,
 });
 
-type QueryFn = (args: {
+export type QueryFn = (args: {
   prompt: string | AsyncIterable<SdkUserMessage>;
   options?: QueryOptions;
 }) => AsyncIterable<SdkMessage>;
 
 let cachedQuery: QueryFn | null = null;
 
-async function loadQuery(): Promise<QueryFn> {
+export async function loadQuery(): Promise<QueryFn> {
   if (cachedQuery) return cachedQuery;
   const mod = (await import('@anthropic-ai/claude-agent-sdk')) as { query: QueryFn };
   cachedQuery = mod.query;

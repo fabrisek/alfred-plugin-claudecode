@@ -1,13 +1,13 @@
 {
   "name": "@alfred-plugin/claude-code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/session.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
@@ -22,21 +22,42 @@
   "alfred": {
     "id": "claude-code",
     "displayName": "Claude (subscription)",
-    "description": "Use one or several Claude.ai subscription seats as an Alfred LLM provider — no API key, no per-token billing. Drives Claude Code headlessly via the official Agent SDK, switches seats automatically on usage limits, and shows per-seat usage on the Claude accounts page.",
+    "description": "Use one or several Claude.ai subscription seats as an Alfred LLM provider — no API key, no per-token billing. Drives Claude Code headlessly via the official Agent SDK, switches seats automatically on usage limits, shows per-seat usage on the Claude accounts page, and lets agents delegate coding tasks to full Claude Code sessions (claude_code_run).",
     "main": "src/index.ts",
     "engine": {
-      "protocolVersion": ">=1.1.0"
+      "protocolVersion": ">=1.6.0"
     },
     "contributes": {
       "providers": [
-        { "id": "claude-code", "displayName": "Claude (subscription)" }
+        {
+          "id": "claude-code",
+          "displayName": "Claude (subscription)"
+        }
+      ],
+      "tools": [
+        {
+          "id": "claude_code_run",
+          "displayName": "Claude Code - run a coding session"
+        },
+        {
+          "id": "claude_code_status",
+          "displayName": "Claude Code - session status"
+        },
+        {
+          "id": "claude_code_cancel",
+          "displayName": "Claude Code - cancel a session"
+        }
       ]
     },
     "bundler": {
-      "external": ["@anthropic-ai/claude-agent-sdk"]
+      "external": [
+        "@anthropic-ai/claude-agent-sdk"
+      ]
     },
     "install": {
-      "runScripts": ["@anthropic-ai/claude-agent-sdk"]
+      "runScripts": [
+        "@anthropic-ai/claude-agent-sdk"
+      ]
     },
     "configSchema": {
       "oauthToken": {
@@ -78,6 +99,50 @@
         "description": "Absolute path to the `claude` CLI binary. Leave empty to auto-detect an installed native CLI (needed for live usage and effort control), falling back to the one bundled with the Agent SDK.",
         "default": "",
         "group": "Advanced"
+      },
+      "sessionPermissionMode": {
+        "type": "string",
+        "label": "Session permission mode",
+        "description": "Most permissive mode a delegated Claude Code session may run in (claude_code_run). plan = read-only; acceptEdits = edit files and run the allowed tools without asking; bypassPermissions = no permission checks at all (any tool, any command). A call can ask for less, never more.",
+        "default": "acceptEdits",
+        "enum": [
+          "plan",
+          "acceptEdits",
+          "bypassPermissions"
+        ],
+        "group": "Sessions"
+      },
+      "sessionAllowedTools": {
+        "type": "string",
+        "label": "Session allowed tools",
+        "description": "Comma-separated Claude Code tools a session may use without asking (Bash(npm test:*) style rules work too). Anything else is refused. Empty = the default development set.",
+        "default": "Read, Write, Edit, MultiEdit, NotebookEdit, Glob, Grep, LS, Bash, BashOutput, KillBash, KillShell, TodoWrite, Task, WebFetch, WebSearch",
+        "group": "Sessions"
+      },
+      "sessionModel": {
+        "type": "string",
+        "label": "Session default model",
+        "description": "Model for claude_code_run when the call names none. Empty = the first model of the catalog.",
+        "default": "",
+        "group": "Sessions"
+      },
+      "sessionTimeoutMs": {
+        "type": "number",
+        "label": "Session timeout (ms)",
+        "description": "Wall-clock budget of one Claude Code session; it is stopped after this. The tool's own host timeout is derived from it (needs a plugin reload).",
+        "default": 1800000,
+        "min": 60000,
+        "step": 60000,
+        "group": "Sessions"
+      },
+      "sessionMaxTurns": {
+        "type": "number",
+        "label": "Session max turns",
+        "description": "Default turn cap of one session (a call may set its own maxTurns).",
+        "default": 200,
+        "min": 1,
+        "step": 1,
+        "group": "Sessions"
       }
     }
   }

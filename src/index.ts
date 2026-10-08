@@ -1,5 +1,6 @@
 import type { AlfredPlugin, PluginContext } from '@alfred/sdk';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   ClaudeCodeProvider,
   DEFAULT_MODELS,
@@ -16,6 +17,14 @@ import {
 } from './accounts/cli.js';
 import { fetchUsage, readCredentials } from './accounts/usage.js';
 import { createDashboardWebview } from './webview/dashboard.js';
+import {
+  DEFAULT_SESSION_TOOLS,
+  SessionRunner,
+  isPermissionMode,
+  type SessionConfig,
+} from './session/runner.js';
+import { SessionIndex } from './session/sessions.js';
+import { registerSessionTools } from './session/tools.js';
 
 function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
   const ctx =
@@ -33,6 +42,26 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
       raw.requestTimeoutMs > 0
         ? raw.requestTimeoutMs
         : 120_000,
+  };
+}
+
+function positive(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/** Settings of the delegated Claude Code sessions (`claude_code_run`). */
+function resolveSessionConfig(raw: Record<string, unknown>, cfg: ClaudeCodeConfig): SessionConfig {
+  const tools = String(raw.sessionAllowedTools ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return {
+    permissionMode: isPermissionMode(raw.sessionPermissionMode) ? raw.sessionPermissionMode : 'acceptEdits',
+    allowedTools: tools.length > 0 ? tools : DEFAULT_SESSION_TOOLS,
+    model: String(raw.sessionModel ?? '').trim() || firstModel(cfg.modelsRaw),
+    timeoutMs: positive(raw.sessionTimeoutMs, 30 * 60_000),
+    maxTurns: Math.round(positive(raw.sessionMaxTurns, 200)),
+    startTimeoutMs: cfg.requestTimeoutMs,
   };
 }
 
@@ -144,11 +173,12 @@ class UsageRefresher {
 
 let refresher: UsageRefresher | null = null;
 let poolRef: AccountPool | null = null;
+let runnerRef: SessionRunner | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
   name: 'Claude (subscription)',
-  version: '0.2.0',
+  version: '0.3.0',
 
   async activate(ctx: PluginContext) {
     const cfg = resolveConfig(ctx.config);
@@ -172,6 +202,18 @@ const plugin: AlfredPlugin = {
     });
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
+
+    // Full Claude Code agent sessions, delegated by Alfred agents.
+    const runner = new SessionRunner({
+      pool,
+      cli,
+      sessions: new SessionIndex(join(ctx.dataDir, 'sessions.json')),
+      config: resolveSessionConfig(ctx.config, cfg),
+      logger: ctx.logger,
+      onAccountUsed: (id) => usage.soon(id),
+    });
+    runnerRef = runner;
+    registerSessionTools(ctx, runner);
 
     const requireId = (args: unknown): string => {
       const id = String((args as { id?: unknown } | undefined)?.id ?? '');
@@ -347,6 +389,8 @@ const plugin: AlfredPlugin = {
   },
 
   deactivate() {
+    runnerRef?.cancelAll();
+    runnerRef = null;
     refresher?.stop();
     refresher = null;
     poolRef?.flush();
