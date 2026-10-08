@@ -7,28 +7,48 @@ import type {
   Message,
   ModelInfo,
 } from '@alfred/sdk';
+// Not an OpenAI-compatible backend — the transport here is a child process, not
+// HTTP — but the request-lifetime and no-op-logger halves of the package are
+// transport-agnostic, so there is no reason to keep a second copy of them.
+import { Deadline, isAbortLike, noopLogger } from '@alfred/provider-openai-compat';
+import type { Account, AccountPool, TokenSample } from './accounts/pool.js';
+import { buildChildEnv, type CliInfo } from './accounts/cli.js';
+import type { RateLimitInfo } from './accounts/usage.js';
 
-const noopLogger: Logger = {
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-};
+/** Backend label prefixed to every error this provider surfaces. */
+const LABEL = 'Claude Code';
+
+/** Separator between a model id and a pinned account id: `opus@seat-3`. */
+export const ACCOUNT_SEPARATOR = '@';
 
 export type ClaudeCodeConfig = {
-  /** Long-lived subscription token from `claude setup-token`. Empty = reuse interactive login. */
+  /** Legacy single setup-token; now only used by the imported default account. */
   oauthToken: string;
   /** Raw `models` config string (comma-separated, optional `id|Display Name`). */
   modelsRaw: string;
   /** Context window reported for every exposed model. */
   contextWindow: number;
-  /** Optional absolute path to the `claude` binary. Empty = SDK default / PATH. */
+  /** Optional absolute path to the `claude` binary. Empty = auto-detect. */
   pathToClaude: string;
+  /**
+   * Time-to-first-chunk budget for one attempt, in ms.
+   *
+   * The SDK's `query()` has no timeout of its own: a CLI that blocks — a
+   * missing binary, an interactive login prompt it cannot show, a wedged child
+   * process — never yields and never rejects, and the generator hangs forever
+   * on the single worker that serves every plugin. Disarmed on the first chunk
+   * that carries real output, so a long answer is never cut short.
+   */
+  requestTimeoutMs: number;
 };
 
 export type ClaudeCodeProviderOptions = {
   config: ClaudeCodeConfig;
+  pool: AccountPool;
+  cli: CliInfo;
   logger?: Logger;
+  /** Called after each attempt on a seat, so the host side can refresh its usage. */
+  onAccountUsed?: (accountId: string) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -47,7 +67,12 @@ type SdkStreamEvent =
   | { type: 'message_delta'; delta?: { stop_reason?: string | null }; usage?: SdkUsage }
   | { type: string };
 
-type SdkUsage = { input_tokens?: number; output_tokens?: number };
+type SdkUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+};
 
 type SdkContentBlock =
   | { type: 'text'; text: string }
@@ -56,15 +81,22 @@ type SdkContentBlock =
 
 type SdkMessage =
   | { type: 'stream_event'; event: SdkStreamEvent }
-  | { type: 'assistant'; message: { content: SdkContentBlock[]; stop_reason?: string | null } }
+  | {
+      type: 'assistant';
+      /** Set by the CLI on synthetic error turns (`rate_limit`, `authentication_failed`, ...). */
+      error?: string;
+      message: { content: SdkContentBlock[]; stop_reason?: string | null; model?: string };
+    }
   | {
       type: 'result';
       subtype?: string;
       result?: string;
+      errors?: string[];
       is_error?: boolean;
       usage?: SdkUsage;
       total_cost_usd?: number;
     }
+  | { type: 'rate_limit_event'; rate_limit_info: RateLimitInfo }
   | { type: string };
 
 type CanUseTool = (
@@ -72,6 +104,19 @@ type CanUseTool = (
   input: Record<string, unknown>,
   opts: unknown,
 ) => Promise<{ behavior: 'deny'; message: string }>;
+
+type SdkImageBlock = {
+  type: 'image';
+  source: { type: 'base64'; media_type: string; data: string };
+};
+type SdkInputBlock = { type: 'text'; text: string } | SdkImageBlock;
+
+type SdkUserMessage = {
+  type: 'user';
+  session_id: string;
+  parent_tool_use_id: null;
+  message: { role: 'user'; content: SdkInputBlock[] };
+};
 
 type QueryOptions = {
   model?: string;
@@ -87,6 +132,7 @@ type QueryOptions = {
   abortController?: AbortController;
   pathToClaudeCodeExecutable?: string;
   canUseTool?: CanUseTool;
+  extraArgs?: Record<string, string | null>;
 };
 
 // Every built-in Claude Code tool, listed so `disallowedTools` strips them from
@@ -122,7 +168,7 @@ const denyAllTools: CanUseTool = async (toolName) => ({
 });
 
 type QueryFn = (args: {
-  prompt: string;
+  prompt: string | AsyncIterable<SdkUserMessage>;
   options?: QueryOptions;
 }) => AsyncIterable<SdkMessage>;
 
@@ -135,6 +181,60 @@ async function loadQuery(): Promise<QueryFn> {
   return cachedQuery;
 }
 
+/** Test seam: replace the SDK's `query`. */
+export function __setQueryForTests(fn: QueryFn | null): void {
+  cachedQuery = fn;
+}
+
+// ---------------------------------------------------------------------------
+// Account failures
+// ---------------------------------------------------------------------------
+
+export type FailureKind = 'limit' | 'auth' | 'other';
+
+/** A failed attempt on one seat, classified so the pool knows whether to move on. */
+export class AccountFailure extends Error {
+  constructor(
+    message: string,
+    readonly kind: FailureKind,
+    readonly account: Account,
+    readonly resetsAt: number | null,
+  ) {
+    super(message);
+    this.name = 'AccountFailure';
+  }
+  get switchable(): boolean {
+    return this.kind === 'limit' || this.kind === 'auth';
+  }
+}
+
+const LIMIT_RE =
+  /usage limit|hit your (?:\w+ )?limit|limit reached|rate[_ -]?limit|too many requests|\b429\b|out of (?:usage|credits)/i;
+const AUTH_RE =
+  /not logged in|please run \/login|invalid (?:api key|bearer token|x-api-key)|oauth token (?:has )?(?:expired|been revoked|revoked)|authentication[_ ](?:failed|error)|\b401\b|unauthori[sz]ed/i;
+
+/** Pull a reset time out of a CLI limit message (`...|1791484800` or a bare epoch). */
+function parseResetFromText(text: string): number | null {
+  const m = /\|(\d{10})\b/.exec(text) ?? /\bresets?(?: at)?\D{0,4}(\d{10})\b/i.exec(text);
+  return m ? Number(m[1]) * 1000 : null;
+}
+
+export function classifyFailure(
+  detail: string,
+  sdkError: string | undefined,
+  rejectedUntil: number | null,
+): { kind: FailureKind; resetsAt: number | null } {
+  if (sdkError === 'rate_limit' || sdkError === 'billing_error' || rejectedUntil !== null || LIMIT_RE.test(detail)) {
+    return { kind: 'limit', resetsAt: rejectedUntil ?? parseResetFromText(detail) };
+  }
+  if (sdkError === 'authentication_failed' || AUTH_RE.test(detail)) return { kind: 'auth', resetsAt: null };
+  return { kind: 'other', resetsAt: null };
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
 export class ClaudeCodeProvider implements LLMProvider {
   readonly id = 'claude-code';
   readonly displayName = 'Claude (subscription)';
@@ -143,10 +243,11 @@ export class ClaudeCodeProvider implements LLMProvider {
   // round-trip Alfred's custom tools as native function calls. Declaring
   // tools:false makes Alfred fall back to its prompt-encoded toolset, so the
   // full Alfred tool ecosystem still works through this provider.
+  // vision:true — images travel as base64 image blocks in the user message.
   readonly capabilities = {
     tools: false,
     thinking: true,
-    vision: false,
+    vision: true,
     streaming: true,
     modelManagement: false,
   };
@@ -157,41 +258,150 @@ export class ClaudeCodeProvider implements LLMProvider {
     this.log = opts.logger ?? noopLogger;
   }
 
+  /**
+   * Runtime facts about this backend, plus the behavioural traits the core
+   * reads instead of hard-coding provider names (see
+   * `packages/core/src/llm/providerTraits.ts`). Never expose a token here.
+   * Snapshotted by the host at registration.
+   */
   getRuntimeConfig(): Record<string, unknown> {
+    const timeout = this.opts.config.requestTimeoutMs;
     return {
       models: this.opts.config.modelsRaw,
       contextWindow: this.opts.config.contextWindow,
-      auth: this.opts.config.oauthToken ? 'setup-token' : 'interactive-login',
-      pathToClaude: this.opts.config.pathToClaude || '(default)',
+      auth: 'account-pool',
+      accounts: this.opts.pool.list().length,
+      cli: `${this.opts.cli.source}${this.opts.cli.path ? ` (${this.opts.cli.path})` : ''}`,
+      requestTimeoutMs: timeout,
+      // A request may try several seats before one answers (each refused
+      // quickly in practice); give the host room for a couple of full attempts.
+      streamFirstChunkTimeoutMs: Math.min(15 * 60_000, timeout * 3),
+
+      // ---- declared traits -------------------------------------------------
+      // The whole toolset is rendered into the prompt on every turn (this
+      // provider declares `tools: false`, so Alfred encodes its tool protocol
+      // as text), which is exactly the case compact descriptions exist for.
+      inlinesToolSchemas: true,
+      // Thinking mode maps onto the CLI's `--effort` (native CLI only). There
+      // is no "off" for adaptive thinking; it maps to the lowest effort.
+      thinkingModeOptions: {
+        off: { claudeEffort: 'low' },
+        low: { claudeEffort: 'low' },
+        medium: { claudeEffort: 'medium' },
+        high: { claudeEffort: 'high' },
+      },
+      // Alfred's own prompt-encoded protocol is Qwen-style `<tool_call>` JSON,
+      // and that is the only textual protocol this provider's replies can
+      // contain — Claude never emits Hermes XML unprompted.
+      textToolCallFormats: ['qwen_json'],
     };
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id);
+    const base = parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id);
+    const pinned: ModelInfo[] = [];
+    for (const account of this.opts.pool.pinnableAccounts()) {
+      for (const m of base) {
+        pinned.push({
+          ...m,
+          id: `${m.id}${ACCOUNT_SEPARATOR}${account.id}`,
+          displayName: `${m.displayName} · ${account.label}`,
+        });
+      }
+    }
+    return [...base, ...pinned];
   }
 
+  /**
+   * Drains {@link stream}. Errors propagate: an aborted or failed turn used to
+   * come back as `{ content: '', finishReason: 'stop' }`, which is
+   * indistinguishable from a model that legitimately said nothing.
+   */
   async chat(req: ChatRequest): Promise<ChatResponse> {
     let response: ChatResponse | undefined;
     for await (const chunk of this.stream(req)) {
       if (chunk.type === 'done') response = chunk.response;
     }
-    return (
-      response ?? { content: '', finishReason: 'stop' }
-    );
+    if (req.signal?.aborted) throw abortError();
+    if (!response) {
+      throw new Error(`${LABEL} stream ended without producing a response.`);
+    }
+    return response;
   }
 
+  /**
+   * One request, possibly several seats. The conversation lives in Alfred and
+   * is re-sent whole on every call, so moving to another seat is simply
+   * running the same request there — as long as nothing reached the caller
+   * yet. Once a chunk is out, a failure is surfaced instead of replayed.
+   */
   async *stream(req: ChatRequest): AsyncIterable<ChatChunk> {
-    const query = await loadQuery();
-    const { systemPrompt, prompt } = buildPrompt(req.messages);
-
-    const controller = new AbortController();
-    if (req.signal) {
-      if (req.signal.aborted) return;
-      req.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const { model, pinned } = splitModel(req.model);
+    const built = buildPrompt(req.messages);
+    if (built.dropped.attachments > 0 || built.dropped.images > 0) {
+      this.log.warn('dropping message parts this provider cannot carry', { ...built.dropped });
     }
+    const tried = new Set<string>();
+    const agent = (req as { metadata?: { agentId?: string } }).metadata?.agentId;
+
+    for (;;) {
+      if (req.signal?.aborted) throw abortError();
+      const pick = this.opts.pool.pick({ model, pinned, exclude: tried });
+      if (!pick.account) throw new Error(`${LABEL}: ${pick.reason}`);
+      const account = pick.account;
+      tried.add(account.id);
+
+      let emitted = false;
+      try {
+        for await (const chunk of this.attempt(req, model, built, account, agent)) {
+          if (chunk.type !== 'done') emitted = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (err instanceof AccountFailure) {
+          if (err.switchable && !emitted) {
+            this.log.warn('switching Claude account', {
+              from: account.id,
+              kind: err.kind,
+              resetsAt: err.resetsAt ? new Date(err.resetsAt).toISOString() : undefined,
+            });
+            continue;
+          }
+          const reset = err.resetsAt ? ` (resets ${new Date(err.resetsAt).toLocaleString()})` : '';
+          throw new Error(
+            emitted
+              ? `${LABEL} account "${account.label}" failed mid-answer${reset}: ${err.message}. The partial answer is incomplete; send again to continue on another account.`
+              : `${LABEL} account "${account.label}"${reset}: ${err.message}`,
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  /** One attempt of `req` on one seat. Throws {@link AccountFailure} on seat-level errors. */
+  private async *attempt(
+    req: ChatRequest,
+    model: string,
+    built: BuiltPrompt,
+    account: Account,
+    agent: string | undefined,
+  ): AsyncIterable<ChatChunk> {
+    const query = await loadQuery();
+    const pool = this.opts.pool;
+
+    // The SDK owns the child process, so cancellation has to reach it through
+    // its own controller. `Deadline` composes the caller's signal with our
+    // time-to-first-chunk budget and detaches from `req.signal` on dispose.
+    const controller = new AbortController();
+    const deadline = new Deadline(req.signal, this.opts.config.requestTimeoutMs, LABEL);
+    const onDeadline = (): void => controller.abort(deadline.signal.reason);
+    if (deadline.signal.aborted) controller.abort(deadline.signal.reason);
+    else deadline.signal.addEventListener('abort', onDeadline, { once: true });
 
     const options: QueryOptions = {
-      model: req.model,
+      model,
       maxTurns: 1,
       // Text-only: no native tools. Alfred sends its tool protocol as text in
       // the system message (capabilities.tools === false) and parses the
@@ -207,18 +417,21 @@ export class ClaudeCodeProvider implements LLMProvider {
       // Don't load the user's CLAUDE.md / project settings / skills — we want a
       // clean completion driven entirely by Alfred's prompt.
       settingSources: [],
-      env: this.buildEnv(),
+      env: buildChildEnv(pool, account),
       abortController: controller,
     };
-    if (systemPrompt) options.systemPrompt = systemPrompt;
-    if (this.opts.config.pathToClaude) {
-      options.pathToClaudeCodeExecutable = this.opts.config.pathToClaude;
+    if (built.systemPrompt) options.systemPrompt = built.systemPrompt;
+    if (this.opts.cli.path) options.pathToClaudeCodeExecutable = this.opts.cli.path;
+    const effort = req.providerOptions?.claudeEffort;
+    if (this.opts.cli.native && typeof effort === 'string' && /^(low|medium|high|xhigh|max)$/.test(effort)) {
+      options.extraArgs = { effort };
     }
 
     this.log.info('stream request', {
-      model: req.model,
+      model,
+      account: account.id,
       messages: req.messages.length,
-      auth: this.opts.config.oauthToken ? 'setup-token' : 'interactive-login',
+      images: built.images,
     });
 
     let assembledContent = '';
@@ -226,16 +439,46 @@ export class ClaudeCodeProvider implements LLMProvider {
     let finishReason: ChatResponse['finishReason'] = 'stop';
     let usage: ChatResponse['usage'];
     let sawStreamedText = false;
+    let tokens: TokenSample | undefined;
+    let rejectedUntil: number | null = null;
+    let sdkError: string | undefined;
+    let syntheticText = '';
+    // What the pool records for this attempt; unset = served.
+    let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
 
+    const buildResponse = (): ChatResponse => ({
+      content: assembledContent.trim(),
+      thinking: assembledThinking.trim() || undefined,
+      finishReason,
+      usage,
+    });
+    const fail = (detail: string): AccountFailure => {
+      const c = classifyFailure(detail, sdkError, rejectedUntil);
+      if (c.kind === 'limit') {
+        const until =
+          c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? Date.now() + 30 * 60_000;
+        pool.markExhausted(account.id, until, detail.slice(0, 200));
+        return new AccountFailure(detail, 'limit', account, until);
+      }
+      if (c.kind === 'auth') pool.markAuthFailed(account.id, detail.slice(0, 200));
+      return new AccountFailure(detail, c.kind, account, null);
+    };
+
+    pool.begin(account.id);
     try {
-      for await (const message of query({ prompt, options })) {
+      for await (const message of query({ prompt: oneUserMessage(built.content), options })) {
         if (message.type === 'stream_event') {
-          const event = message.event;
+          // The SDK's message union ends in a catch-all `{ type: string }`, so
+          // a discriminant check does not narrow on its own.
+          const { event } = message as Extract<SdkMessage, { type: 'stream_event' }>;
           if (event.type === 'content_block_delta' && 'delta' in event && event.delta) {
             const delta = event.delta as SdkContentDelta;
             if (delta.type === 'text_delta') {
               const text = (delta as SdkTextDelta).text ?? '';
               if (text) {
+                // First real output: the CLI is alive, so stop policing the
+                // clock. A long answer is not a stalled request.
+                deadline.disarmTimeout();
                 assembledContent += text;
                 sawStreamedText = true;
                 yield { type: 'text', delta: text };
@@ -243,6 +486,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             } else if (delta.type === 'thinking_delta') {
               const thinking = (delta as SdkThinkingDelta).thinking ?? '';
               if (thinking) {
+                deadline.disarmTimeout();
                 assembledThinking += thinking;
                 yield { type: 'thinking', delta: thinking };
               }
@@ -252,15 +496,29 @@ export class ClaudeCodeProvider implements LLMProvider {
             if (md.delta?.stop_reason) finishReason = mapStopReason(md.delta.stop_reason);
             if (md.usage) usage = mergeUsage(usage, md.usage);
           }
+        } else if (message.type === 'rate_limit_event') {
+          const info = (message as Extract<SdkMessage, { type: 'rate_limit_event' }>).rate_limit_info;
+          if (info) {
+            const until = pool.applyRateLimit(account.id, info);
+            if (until !== null) rejectedUntil = until;
+          }
         } else if (message.type === 'assistant') {
+          const am = message as Extract<SdkMessage, { type: 'assistant' }>;
+          // The CLI reports seat-level failures (limit hit, login expired) as a
+          // synthetic assistant turn. That text is an error, never an answer.
+          if (am.error || am.message.model === '<synthetic>') {
+            sdkError = am.error ?? sdkError;
+            syntheticText += textOf(am.message.content);
+            continue;
+          }
           // Fallback: if partial streaming yielded nothing, reconstruct from the
           // complete assistant message.
           if (!sawStreamedText) {
-            const am = message as Extract<SdkMessage, { type: 'assistant' }>;
             for (const block of am.message.content ?? []) {
               if (block.type === 'text') {
                 const text = (block as { text: string }).text ?? '';
                 if (text) {
+                  deadline.disarmTimeout();
                   assembledContent += text;
                   yield { type: 'text', delta: text };
                 }
@@ -272,77 +530,128 @@ export class ClaudeCodeProvider implements LLMProvider {
           }
         } else if (message.type === 'result') {
           const rm = message as Extract<SdkMessage, { type: 'result' }>;
-          if (rm.usage) usage = mergeUsage(usage, rm.usage);
-          if (rm.is_error || rm.subtype === 'error_max_turns' || rm.subtype === 'error_during_execution') {
-            const detail = rm.result || rm.subtype || 'unknown error';
-            // No content streamed and the run errored — surface it. The most
-            // common cause is "not logged in": run `claude` (or `claude
-            // setup-token`) once so the subscription credentials exist.
-            if (!assembledContent) {
-              throw new Error(
-                `Claude Code returned an error: ${detail}. ` +
-                  `If this is an auth failure, log in with the Claude CLI (interactive ` +
-                  `\`claude\` or \`claude setup-token\`) using your subscription account.`,
-              );
+          if (rm.usage) {
+            usage = mergeUsage(usage, rm.usage);
+            tokens = {
+              input: rm.usage.input_tokens ?? 0,
+              output: rm.usage.output_tokens ?? 0,
+              cacheRead: rm.usage.cache_read_input_tokens ?? 0,
+              cacheWrite: rm.usage.cache_creation_input_tokens ?? 0,
+              costUsd: typeof rm.total_cost_usd === 'number' ? rm.total_cost_usd : 0,
+            };
+          }
+          const errored =
+            rm.is_error || rm.subtype === 'error_max_turns' || rm.subtype === 'error_during_execution';
+          if (errored || sdkError) {
+            const detail =
+              syntheticText.trim() || rm.result || rm.errors?.join('; ') || rm.subtype || 'unknown error';
+            const failure = fail(detail);
+            // Seat-level failures always surface (the caller decides whether to
+            // switch). Other errors after streamed content keep the old
+            // behaviour: the answer stands.
+            if (failure.switchable || !assembledContent) {
+              failed = { outcome: failure.switchable && !assembledContent ? 'switched' : 'error', detail };
+              throw failure;
             }
           }
         }
       }
     } catch (err) {
-      if ((err as Error).name === 'AbortError' || controller.signal.aborted) return;
+      if (err instanceof AccountFailure) throw err;
+      if (isAbortLike(err) || controller.signal.aborted) {
+        // User pressed Stop, or our own time-to-first-chunk budget fired. The
+        // host contract requires exactly one `done`. A timeout that produced
+        // nothing at all is still a failure, so it is reported as one.
+        if (!deadline.userAborted && assembledContent.length === 0) {
+          failed = { outcome: 'error', detail: `no output within ${this.opts.config.requestTimeoutMs}ms` };
+          throw new Error(
+            `${LABEL} produced nothing within ${this.opts.config.requestTimeoutMs}ms on account "${account.label}". ` +
+              `Check that the \`claude\` CLI is installed and that account is logged in (Claude accounts page).`,
+          );
+        }
+        yield { type: 'done', response: buildResponse() };
+        return;
+      }
+      // The SDK throws on a non-zero CLI exit; its message carries the reason.
+      const detail = (err instanceof Error ? err.message : String(err)) + (syntheticText ? ` ${syntheticText}` : '');
+      const failure = fail(detail);
+      failed = { outcome: failure.switchable && !assembledContent ? 'switched' : 'error', detail };
+      if (failure.switchable) throw failure;
       throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      // Also runs when the consumer breaks out of the loop early, which is what
+      // detaches our listener from the host's long-lived abort signal.
+      deadline.dispose();
+      pool.end(account.id, {
+        model,
+        outcome: failed?.outcome ?? 'ok',
+        agent,
+        tokens,
+        detail: failed?.detail.slice(0, 300),
+      });
+      this.opts.onAccountUsed?.(account.id);
     }
 
-    const response: ChatResponse = {
-      content: assembledContent.trim(),
-      thinking: assembledThinking.trim() || undefined,
-      finishReason,
-      usage,
-    };
-    yield { type: 'done', response };
+    yield { type: 'done', response: buildResponse() };
   }
+}
 
-  /**
-   * Build the child-process environment so inference uses the SUBSCRIPTION,
-   * never the API. We strip every API-key-style variable that would otherwise
-   * take precedence over OAuth/subscription credentials, and inject the
-   * setup-token when the user provided one.
-   */
-  private buildEnv(): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value === undefined) continue;
-      env[key] = value;
-    }
-    // These override subscription auth — remove them so the CLI falls back to
-    // the setup-token / interactive-login subscription credentials.
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    delete env.CLAUDE_CODE_USE_BEDROCK;
-    delete env.CLAUDE_CODE_USE_VERTEX;
-    if (this.opts.config.oauthToken) {
-      env.CLAUDE_CODE_OAUTH_TOKEN = this.opts.config.oauthToken;
-    }
-    return env;
-  }
+/** An abort the host recognises and closes the turn quietly on. */
+function abortError(): Error {
+  const err = new Error(`${LABEL} request aborted`);
+  err.name = 'AbortError';
+  return err;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** `opus@seat-3` -> model `opus`, pinned seat `seat-3`. */
+export function splitModel(id: string): { model: string; pinned?: string } {
+  const at = id.lastIndexOf(ACCOUNT_SEPARATOR);
+  if (at <= 0) return { model: id };
+  return { model: id.slice(0, at), pinned: id.slice(at + 1) || undefined };
+}
+
+function textOf(content: SdkContentBlock[] | undefined): string {
+  return (content ?? [])
+    .filter((b) => b.type === 'text')
+    .map((b) => (b as { text: string }).text ?? '')
+    .join('');
+}
+
+async function* oneUserMessage(content: SdkInputBlock[]): AsyncIterable<SdkUserMessage> {
+  yield {
+    type: 'user',
+    session_id: '',
+    parent_tool_use_id: null,
+    message: { role: 'user', content },
+  };
+}
+
+/**
+ * The CLI's moving aliases. Pinning a dated id is possible (the config accepts
+ * any string) but an alias is what most users want: it follows the family
+ * without a settings edit at every release.
+ */
 const ALIAS_DISPLAY: Record<string, string> = {
   opus: 'Claude Opus (latest)',
   sonnet: 'Claude Sonnet (latest)',
   haiku: 'Claude Haiku (latest)',
+  fable: 'Claude Fable (latest)',
 };
+
+/** Fallback catalog when the config string is empty. Keep in step with the
+ *  manifest's `models` default and with {@link ALIAS_DISPLAY}. */
+export const DEFAULT_MODELS = ['opus', 'sonnet', 'haiku', 'fable'];
 
 function parseModels(raw: string, contextWindow: number, providerId: string): ModelInfo[] {
   const entries = raw
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  if (entries.length === 0) entries.push('opus', 'sonnet', 'haiku');
+  if (entries.length === 0) entries.push(...DEFAULT_MODELS);
   const seen = new Set<string>();
   const models: ModelInfo[] = [];
   for (const entry of entries) {
@@ -356,33 +665,123 @@ function parseModels(raw: string, contextWindow: number, providerId: string): Mo
       providerId,
       displayName,
       contextWindow: contextWindow > 0 ? contextWindow : 200000,
-      capabilities: { tools: false, thinking: true, vision: false },
+      capabilities: { tools: false, thinking: true, vision: true },
     });
   }
   return models;
 }
 
+/** Message parts this provider could not carry, for the caller to report. */
+export type DroppedParts = { images: number; attachments: number };
+
+export type BuiltPrompt = {
+  systemPrompt: string;
+  /** One user message: the labelled transcript, with each turn's images right after its text. */
+  content: SdkInputBlock[];
+  images: number;
+  dropped: DroppedParts;
+};
+
+const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Format from the base64 magic bytes; `Message.images` carries no mime type. */
+export function sniffImageMime(b64: string): string | null {
+  if (b64.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (b64.startsWith('/9j/')) return 'image/jpeg';
+  if (b64.startsWith('R0lGOD')) return 'image/gif';
+  if (b64.startsWith('UklGR') && Buffer.from(b64.slice(0, 16), 'base64').subarray(8, 12).toString() === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
+
+function stripDataUrl(b64: string): string {
+  const comma = b64.startsWith('data:') ? b64.indexOf(',') : -1;
+  return comma >= 0 ? b64.slice(comma + 1) : b64;
+}
+
+/** Image blocks of one message: typed attachments first, else the bare `images` array. */
+function imageBlocks(msg: Message, dropped: DroppedParts): SdkImageBlock[] {
+  const blocks: SdkImageBlock[] = [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const imageAttachments = attachments.filter((a) => a.mimeType?.startsWith('image/'));
+  dropped.attachments += attachments.length - imageAttachments.length;
+  if (imageAttachments.length > 0) {
+    for (const a of imageAttachments) {
+      const data = stripDataUrl(a.data ?? '');
+      const mime = IMAGE_MIME.has(a.mimeType) ? a.mimeType : sniffImageMime(data);
+      if (data && mime) blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data } });
+      else dropped.images += 1;
+    }
+    return blocks;
+  }
+  for (const raw of msg.images ?? []) {
+    const data = stripDataUrl(raw ?? '');
+    const mime = sniffImageMime(data);
+    if (data && mime) blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data } });
+    else dropped.images += 1;
+  }
+  return blocks;
+}
+
 /**
- * Flatten Alfred's message array into a single Claude Code prompt. System
- * messages are concatenated into the SDK `systemPrompt`; the remaining
- * conversation is rendered as a labeled transcript so prior turns (and the
- * prompt-encoded tool calls/results Alfred injects) are preserved.
+ * Flatten Alfred's message array into one Claude Code user message. System
+ * messages become the SDK `systemPrompt`; the rest of the conversation is
+ * rendered as a labelled transcript so every prior turn is preserved, with
+ * each turn's images inserted as image blocks right after its text.
+ *
+ * An assistant turn's `toolCalls` are re-rendered as the same
+ * `<tool_call>{…}</tool_call>` markup Alfred's prompt-encoded protocol uses on
+ * the way out, so the model sees what it asked for and the tool result that
+ * follows refers to something.
  */
-function buildPrompt(messages: Message[]): { systemPrompt: string; prompt: string } {
+export function buildPrompt(messages: Message[]): BuiltPrompt {
   const systemParts: string[] = [];
-  const convoParts: string[] = [];
+  const content: SdkInputBlock[] = [];
+  const dropped: DroppedParts = { images: 0, attachments: 0 };
+  let pendingText: string[] = [];
+  let images = 0;
+  const flush = (): void => {
+    if (pendingText.length === 0) return;
+    content.push({ type: 'text', text: pendingText.join('\n\n') });
+    pendingText = [];
+  };
   for (const msg of messages) {
-    const content = msg.content ?? '';
+    const text = msg.content ?? '';
     if (msg.role === 'system') {
-      if (content) systemParts.push(content);
+      if (text) systemParts.push(text);
       continue;
     }
-    convoParts.push(`${roleLabel(msg)}:\n${content}`);
+    const body = [text, renderToolCalls(msg)].filter((p) => p.length > 0).join('\n');
+    pendingText.push(`${roleLabel(msg)}:\n${body}`);
+    const blocks = imageBlocks(msg, dropped);
+    if (blocks.length > 0) {
+      flush();
+      content.push(...blocks);
+      images += blocks.length;
+    }
   }
+  flush();
+  if (content.length === 0) content.push({ type: 'text', text: 'User:\n' });
   return {
     systemPrompt: systemParts.join('\n\n').trim(),
-    prompt: convoParts.join('\n\n').trim(),
+    content,
+    images,
+    dropped,
   };
+}
+
+function renderToolCalls(msg: Message): string {
+  if (!msg.toolCalls || msg.toolCalls.length === 0) return '';
+  return msg.toolCalls
+    .map((tc) =>
+      [
+        '<tool_call>',
+        JSON.stringify({ name: tc.name, arguments: tc.arguments ?? {} }),
+        '</tool_call>',
+      ].join('\n'),
+    )
+    .join('\n');
 }
 
 function roleLabel(msg: Message): string {

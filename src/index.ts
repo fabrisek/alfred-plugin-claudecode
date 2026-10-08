@@ -1,9 +1,21 @@
 import type { AlfredPlugin, PluginContext } from '@alfred/sdk';
-import { exec } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { ClaudeCodeProvider, type ClaudeCodeConfig } from './ClaudeCodeProvider.js';
+import { readFile } from 'node:fs/promises';
+import {
+  ClaudeCodeProvider,
+  DEFAULT_MODELS,
+  ACCOUNT_SEPARATOR,
+  type ClaudeCodeConfig,
+} from './ClaudeCodeProvider.js';
+import { AccountPool, emptyTally, type Account, type Tally } from './accounts/pool.js';
+import {
+  authStatus,
+  cliVersion,
+  openLoginTerminal,
+  resolveCli,
+  type CliInfo,
+} from './accounts/cli.js';
+import { fetchUsage, readCredentials } from './accounts/usage.js';
+import { createDashboardWebview } from './webview/dashboard.js';
 
 function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
   const ctx =
@@ -12,56 +24,307 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
       : 200000;
   return {
     oauthToken: String(raw.oauthToken ?? '').trim(),
-    modelsRaw: String(raw.models ?? '').trim() || 'opus, sonnet, haiku',
+    modelsRaw: String(raw.models ?? '').trim() || DEFAULT_MODELS.join(', '),
     contextWindow: ctx,
     pathToClaude: String(raw.pathToClaude ?? '').trim(),
+    requestTimeoutMs:
+      typeof raw.requestTimeoutMs === 'number' &&
+      Number.isFinite(raw.requestTimeoutMs) &&
+      raw.requestTimeoutMs > 0
+        ? raw.requestTimeoutMs
+        : 120_000,
   };
 }
+
+/** Polls each seat's usage, one fetch at a time per seat. */
+class UsageRefresher {
+  private readonly running = new Map<string, Promise<void>>();
+  private readonly lastFetch = new Map<string, number>();
+  private readonly scheduled = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private lastSweep = 0;
+
+  constructor(private readonly pool: AccountPool) {}
+
+  start(): void {
+    this.timer = setInterval(() => {
+      const every = this.pool.settings.usagePollMinutes * 60_000;
+      if (Date.now() - this.lastSweep >= every) void this.refreshAll();
+    }, 60_000);
+    this.timer.unref?.();
+    void this.refreshAll();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  refreshAll(): Promise<void> {
+    this.lastSweep = Date.now();
+    const targets = this.pool.list().filter((a) => a.enabled && this.pool.hasCredentials(a));
+    return Promise.all(targets.map((a) => this.refresh(a))).then(() => undefined);
+  }
+
+  /** After a request: the CLI just refreshed the token, so the API numbers are readable again. */
+  soon(id: string): void {
+    if (this.scheduled.has(id)) return;
+    if (Date.now() - (this.lastFetch.get(id) ?? 0) < 60_000) return;
+    this.scheduled.add(id);
+    const t = setTimeout(() => {
+      this.scheduled.delete(id);
+      const a = this.pool.get(id);
+      if (a) void this.refresh(a);
+    }, 5_000);
+    t.unref?.();
+  }
+
+  refresh(a: Account): Promise<void> {
+    const existing = this.running.get(a.id);
+    if (existing) return existing;
+    const p = this.doRefresh(a).finally(() => this.running.delete(a.id));
+    this.running.set(a.id, p);
+    return p;
+  }
+
+  private async doRefresh(a: Account): Promise<void> {
+    this.lastFetch.set(a.id, Date.now());
+    await this.readIdentity(a);
+    let token = '';
+    let expiresAt: number | undefined;
+    if (a.auth === 'token') {
+      token = this.pool.tokenFor(a);
+    } else {
+      const creds = await readCredentials(this.pool.credentialsPath(a));
+      if (creds) {
+        token = creds.accessToken ?? '';
+        expiresAt = creds.expiresAt;
+        this.pool.setIdentity(a.id, { subscriptionType: creds.subscriptionType });
+      }
+    }
+    if (!token) {
+      this.pool.markUsageStale(a.id, 'not logged in');
+      return;
+    }
+    const res = await fetchUsage(token, expiresAt);
+    if (!res.ok) {
+      this.pool.markUsageStale(a.id, res.reason);
+      return;
+    }
+    this.pool.setUsage(a.id, res.usage);
+    this.pool.clearAuthFailed(a.id);
+    // A window at 100% means the seat is out until it resets, whatever the
+    // stream has (not yet) said.
+    const now = Date.now();
+    const full = res.usage.windows.filter(
+      (w) => !w.model && (w.percent ?? 0) >= 100 && w.resetsAt !== null && w.resetsAt > now,
+    );
+    if (full.length > 0) {
+      const until = Math.max(...full.map((w) => w.resetsAt as number));
+      this.pool.markExhausted(a.id, until, `${full.map((w) => w.label).join(' + ')} at 100%`);
+    }
+  }
+
+  /** Email / org of a login seat, from the CLI's own `.claude.json`. */
+  private async readIdentity(a: Account): Promise<void> {
+    if (a.auth !== 'login') return;
+    try {
+      const raw = JSON.parse(await readFile(this.pool.globalConfigPath(a), 'utf8')) as {
+        oauthAccount?: { emailAddress?: string; organizationName?: string };
+      };
+      this.pool.setIdentity(a.id, {
+        email: raw.oauthAccount?.emailAddress,
+        orgName: raw.oauthAccount?.organizationName,
+      });
+    } catch {
+      // No config yet: not logged in, or never run.
+    }
+  }
+}
+
+let refresher: UsageRefresher | null = null;
+let poolRef: AccountPool | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
   name: 'Claude (subscription)',
-  version: '0.1.0',
+  version: '0.2.0',
 
   async activate(ctx: PluginContext) {
     const cfg = resolveConfig(ctx.config);
-    const provider = new ClaudeCodeProvider({ config: cfg, logger: ctx.logger });
-    ctx.registerProvider(provider);
+    const cli = resolveCli(cfg.pathToClaude);
+    const pool = new AccountPool({ dataDir: ctx.dataDir, logger: ctx.logger, legacyToken: cfg.oauthToken });
+    // A legacy single setup-token keeps working: it becomes the default seat's token.
+    const def = pool.get('default');
+    if (cfg.oauthToken && def && def.auth === 'login' && !pool.hasCredentials(def)) {
+      pool.update('default', { auth: 'token' });
+    }
+    poolRef = pool;
+    const usage = new UsageRefresher(pool);
+    refresher = usage;
 
-    // Validate that the subscription auth works by running a tiny completion.
-    // This consumes a negligible amount of subscription quota — only invoked
-    // explicitly from Settings.
-    ctx.registerAction('testConnection', async () => {
+    const provider = new ClaudeCodeProvider({
+      config: cfg,
+      pool,
+      cli,
+      logger: ctx.logger,
+      onAccountUsed: (id) => usage.soon(id),
+    });
+    ctx.registerProvider(provider);
+    ctx.registerWebview(createDashboardWebview());
+
+    const requireId = (args: unknown): string => {
+      const id = String((args as { id?: unknown } | undefined)?.id ?? '');
+      if (!pool.get(id)) throw new Error(`Unknown account "${id}".`);
+      return id;
+    };
+    const safe =
+      (fn: (args: unknown) => Promise<Record<string, unknown>> | Record<string, unknown>) =>
+      async (args: unknown) => {
+        try {
+          return { ok: true, ...(await fn(args)) };
+        } catch (err) {
+          return { ok: false, error: (err as Error).message };
+        }
+      };
+
+    // ---- dashboard -------------------------------------------------------
+
+    ctx.registerAction(
+      'poolSnapshot',
+      safe(() => snapshot(pool, cli)),
+    );
+
+    ctx.registerAction(
+      'addAccount',
+      safe((args) => {
+        const a = (args ?? {}) as { label?: string; token?: string; login?: boolean };
+        const label = String(a.label ?? '').trim();
+        if (!label) throw new Error('Label required.');
+        const token = String(a.token ?? '').trim();
+        const account = pool.add(label, token ? 'token' : 'login');
+        if (token) pool.setToken(account.id, token);
+        else if (a.login !== false) openLoginTerminal(pool, account, cli);
+        return { id: account.id };
+      }),
+    );
+
+    ctx.registerAction(
+      'removeAccount',
+      safe((args) => {
+        pool.remove(requireId(args));
+        return {};
+      }),
+    );
+
+    ctx.registerAction(
+      'updateAccount',
+      safe((args) => {
+        const id = requireId(args);
+        const a = args as { label?: string; enabled?: boolean; exposeModels?: boolean };
+        pool.update(id, { label: a.label, enabled: a.enabled, exposeModels: a.exposeModels });
+        return {};
+      }),
+    );
+
+    ctx.registerAction(
+      'setPreferred',
+      safe((args) => {
+        pool.setPreferred(requireId(args));
+        return {};
+      }),
+    );
+
+    ctx.registerAction(
+      'loginAccount',
+      safe((args) => {
+        const account = pool.get(requireId(args))!;
+        pool.clearAuthFailed(account.id);
+        return openLoginTerminal(pool, account, cli);
+      }),
+    );
+
+    ctx.registerAction(
+      'setAccountToken',
+      safe((args) => {
+        const id = requireId(args);
+        pool.setToken(id, String((args as { token?: unknown }).token ?? ''));
+        return {};
+      }),
+    );
+
+    ctx.registerAction(
+      'refreshUsage',
+      safe(async (args) => {
+        const id = (args as { id?: string } | undefined)?.id;
+        if (id) {
+          pool.clearAuthFailed(requireId(args));
+          await usage.refresh(pool.get(id)!);
+        } else {
+          await usage.refreshAll();
+        }
+        return {};
+      }),
+    );
+
+    ctx.registerAction(
+      'updateSettings',
+      safe((args) => ({ settings: pool.updateSettings((args ?? {}) as Record<string, never>) })),
+    );
+
+    // ---- existing actions, now per account --------------------------------
+
+    // Validate that a seat's subscription auth works by running a tiny
+    // completion. Consumes a negligible amount of that seat's quota — only
+    // invoked explicitly. `accountId` pins the seat; without it the pool picks.
+    ctx.registerAction('testConnection', async (args) => {
+      const accountId = (args as { accountId?: string } | undefined)?.accountId;
       try {
+        if (accountId) {
+          const account = pool.get(accountId);
+          if (!account) return { ok: false, error: `Unknown account "${accountId}".` };
+          const why = pool.unavailableReason(account);
+          if (why) return { ok: false, error: `${account.label}: ${why}` };
+        }
+        const model = firstModel(cfg.modelsRaw);
         const res = await provider.chat({
-          model: firstModel(cfg.modelsRaw),
-          messages: [
-            { role: 'user', content: 'Reply with exactly: OK' },
-          ],
+          model: accountId ? `${model}${ACCOUNT_SEPARATOR}${accountId}` : model,
+          messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
         });
         const text = res.content.trim();
         if (!text) {
           return { ok: false, error: 'No response from Claude Code (empty output).' };
         }
-        return { ok: true, sample: text.slice(0, 80) };
+        const served = pool.recent.find((r) => r.outcome === 'ok')?.accountId;
+        if (accountId && served !== accountId) {
+          return { ok: false, error: `${accountId} failed; the request was served by ${served ?? 'another account'}.` };
+        }
+        return { ok: true, sample: text.slice(0, 80), account: served };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
     });
 
-    // Cheap, quota-free preflight: is the CLI reachable and are subscription
-    // credentials present? Surfaced in Settings so the user can sort out login
-    // before spending a turn. Drives the exact commands to run.
-    ctx.registerAction('authStatus', async () => {
-      const cli = await checkCli(cfg.pathToClaude);
-      const creds = checkCredentials(cfg.oauthToken);
-      const ready = cli.found && creds.configured;
+    // Quota-free preflight: is the CLI reachable and is each seat logged in?
+    ctx.registerAction('authStatus', async (args) => {
+      const accountId = (args as { accountId?: string } | undefined)?.accountId;
+      const version = await cliVersion(cli);
+      const targets = accountId ? pool.list().filter((a) => a.id === accountId) : pool.list();
+      const accounts = await Promise.all(
+        targets.map(async (a) => {
+          const st = await authStatus(pool, a, cli);
+          if (st.loggedIn) pool.clearAuthFailed(a.id);
+          pool.setIdentity(a.id, st);
+          return { id: a.id, label: a.label, enabled: a.enabled, auth: a.auth, ...st };
+        }),
+      );
+      const ready = version.found && accounts.some((a) => a.loggedIn && a.enabled);
       return {
         ok: true,
         ready,
-        cli,
-        credentials: creds,
-        nextSteps: buildNextSteps(cli, creds),
+        cli: { ...version, path: cli.path || '(bundled)', source: cli.source },
+        accounts,
+        nextSteps: buildNextSteps(version.found, accounts),
       };
     });
 
@@ -74,83 +337,96 @@ const plugin: AlfredPlugin = {
       }
     });
 
-    if (!cfg.oauthToken) {
-      ctx.logger.info(
-        'Claude (subscription) plugin activated — using interactive login credentials. ' +
-          'If inference fails with an auth error, run `claude` (or `claude setup-token`) ' +
-          'once with your Pro/Max account.',
-        { models: cfg.modelsRaw },
-      );
-    } else {
-      ctx.logger.info('Claude (subscription) plugin activated — using setup-token.', {
-        models: cfg.modelsRaw,
-      });
-    }
+    usage.start();
+    ctx.logger.info('Claude (subscription) plugin activated', {
+      models: cfg.modelsRaw,
+      accounts: pool.list().length,
+      cli: cli.source,
+      strategy: pool.settings.strategy,
+    });
+  },
+
+  deactivate() {
+    refresher?.stop();
+    refresher = null;
+    poolRef?.flush();
+    poolRef = null;
   },
 };
 
-type CliStatus = { found: boolean; version?: string; error?: string };
-type CredStatus = { configured: boolean; method: string; detail: string };
+type AccountView = Record<string, unknown>;
 
-/** Resolve the `claude` CLI by running `--version` through the shell (handles
- *  claude.cmd on Windows). Never throws; reports found:false on any failure. */
-function checkCli(pathToClaude: string): Promise<CliStatus> {
-  return new Promise((resolveP) => {
-    const bin = pathToClaude ? `"${pathToClaude}"` : 'claude';
-    exec(`${bin} --version`, { timeout: 10_000 }, (err, stdout) => {
-      if (err) {
-        resolveP({ found: false, error: err.message });
-      } else {
-        resolveP({ found: true, version: String(stdout).trim() });
-      }
-    });
-  });
+function addTally(into: Tally, t: Tally): void {
+  into.input += t.input;
+  into.output += t.output;
+  into.cacheRead += t.cacheRead;
+  into.cacheWrite += t.cacheWrite;
+  into.costUsd += t.costUsd;
+  into.requests += t.requests;
 }
 
-/** Detect whether subscription credentials are available without spending
- *  quota. A configured setup-token wins; otherwise look for the interactive
- *  login credentials file. (On macOS those may live in the Keychain instead,
- *  so absence here is not definitive — say so.) */
-function checkCredentials(oauthToken: string): CredStatus {
-  if (oauthToken) {
+/** Everything the dashboard shows. No secrets: tokens and credential paths stay here. */
+function snapshot(pool: AccountPool, cli: CliInfo): Record<string, unknown> {
+  const now = Date.now();
+  const list = pool.list();
+  const lastServed = pool.recent.find((r) => r.outcome === 'ok')?.accountId;
+  const totals = { window5h: emptyTally(), week: emptyTally(), total: emptyTally() };
+  const accounts: AccountView[] = list.map((a, i) => {
+    const rt = pool.runtime(a.id);
+    const why = pool.unavailableReason(a, now);
+    const inFlight = pool.inFlightOf(a.id);
+    let status: string;
+    if (why === null) status = inFlight > 0 || a.id === lastServed ? 'active' : 'ok';
+    else if (why.startsWith('auth failed')) status = 'auth failed';
+    else status = why;
+    const tokens = pool.tokenSummary(a.id);
+    addTally(totals.window5h, tokens.window5h);
+    addTally(totals.week, tokens.week);
+    addTally(totals.total, tokens.total);
     return {
-      configured: true,
-      method: 'setup-token',
-      detail: 'Using the setup-token configured in the plugin settings.',
+      id: a.id,
+      label: a.label,
+      enabled: a.enabled,
+      auth: a.auth,
+      preferred: i === 0,
+      exposeModels: a.exposeModels,
+      status,
+      statusDetail: why === 'exhausted' ? rt.exhaustedReason : why,
+      exhaustedUntil: rt.exhaustedUntil && rt.exhaustedUntil > now ? rt.exhaustedUntil : null,
+      usage: rt.usage ?? null,
+      lastError: rt.lastError ?? null,
+      lastUsedAt: rt.lastUsedAt ?? null,
+      requests: rt.requests ?? 0,
+      inFlight,
+      email: rt.email ?? null,
+      orgName: rt.orgName ?? null,
+      subscriptionType: rt.subscriptionType ?? null,
+      tokens,
     };
-  }
-  const credPath = join(homedir(), '.claude', '.credentials.json');
-  if (existsSync(credPath)) {
-    return {
-      configured: true,
-      method: 'interactive-login',
-      detail: `Found interactive login credentials at ${credPath}.`,
-    };
-  }
+  });
+  const labels = new Map(list.map((a) => [a.id, a.label]));
   return {
-    configured: false,
-    method: 'none',
-    detail:
-      'No setup-token configured and no ~/.claude/.credentials.json found. ' +
-      'On macOS the credentials may live in the Keychain — run `claude` to confirm.',
+    settings: pool.settings,
+    cli: cli.path ? `CLI: ${cli.source}` : 'CLI: bundled (no live usage)',
+    accounts,
+    totals,
+    recent: pool.recent.map((r) => ({ ...r, accountLabel: labels.get(r.accountId) ?? r.accountId })),
   };
 }
 
-function buildNextSteps(cli: CliStatus, creds: CredStatus): string[] {
+function buildNextSteps(cliFound: boolean, accounts: Array<{ label: string; enabled: boolean; loggedIn: boolean }>): string[] {
   const steps: string[] = [];
-  if (!cli.found) {
+  if (!cliFound) {
     steps.push(
-      'Install the Claude Code CLI and ensure it is on your PATH: `npm install -g @anthropic-ai/claude-code` (or set "Path to claude executable" in the plugin settings).',
+      'Install the Claude Code CLI (native installer or `npm install -g @anthropic-ai/claude-code`), or set "Path to claude executable" in the plugin settings.',
     );
   }
-  if (!creds.configured) {
-    steps.push(
-      'Log in with your Claude.ai subscription — either run `claude` once and sign in interactively, or run `claude setup-token` and paste the token into the plugin\'s "Setup token" field.',
-    );
+  for (const a of accounts) {
+    if (a.enabled && !a.loggedIn) {
+      steps.push(`Log in account "${a.label}" from the Claude accounts page (Login button), or paste a \`claude setup-token\` token there.`);
+    }
   }
-  if (steps.length === 0) {
-    steps.push('Ready — run the "testConnection" action to confirm inference works.');
-  }
+  if (steps.length === 0) steps.push('Ready — run "testConnection" to confirm inference works.');
   return steps;
 }
 

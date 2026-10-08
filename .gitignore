@@ -2,3 +2,4 @@ node_modules/
 dist/
 .alfred-bundle/
 state/
+tests/.tmp*
