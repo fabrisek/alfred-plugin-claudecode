@@ -368,6 +368,10 @@ function bridge(snap = snapshot([liveTurn()])): { b: Bridge; invoke: (a: string,
   return { b, invoke };
 }
 
+// The usage-history poll runs on its own slow timer; these tests watch the snapshot poll.
+const snapCalls = (page: Awaited<ReturnType<typeof runPage>>) => page.calls.filter((c) => c.action === 'poolSnapshot').length;
+const actionCalls = (page: Awaited<ReturnType<typeof runPage>>) => page.calls.filter((c) => c.action !== 'poolSnapshot' && c.action !== 'usageHistory');
+
 const btn = (page: Awaited<ReturnType<typeof runPage>>, act: string, id?: string) =>
   page.doc.querySelector(id ? `button[data-act=${act}][data-id=${id}]` : `button[data-act=${act}]`);
 
@@ -377,6 +381,12 @@ describe('Claude panel page', () => {
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
     assert.deepEqual(page.errors, []);
     assert.deepEqual(page.parseIssues, []);
+    // The live turns sit behind the "N running" toggle in the Seats header.
+    assert.match(page.$('runsBtn')!.textContent, /1 running · 1 sub-agent/);
+    assert.equal(page.$('actPanel')!.hidden, true, 'closed until asked');
+    assert.equal(page.doc.querySelectorAll('#act tr').length, 0, 'and not built while closed');
+    await page.click(page.$('runsBtn'));
+    assert.equal(page.$('actPanel')!.hidden, false);
     const body = page.doc.body.textContent.replace(/\s+/g, ' ');
     assert.match(body, /Fix the login bug/);
     assert.match(body, /Explore/);
@@ -396,21 +406,22 @@ describe('Claude panel page', () => {
     const { b, invoke } = bridge();
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
     await page.advance(60_000);
-    assert.deepEqual(page.timers(), { intervals: 1, timeouts: 1 });
+    // The snapshot poll and the (slow) usage-history poll: one timeout each.
+    assert.deepEqual(page.timers(), { intervals: 1, timeouts: 2 });
     const polls = page.calls.filter((c) => c.action === 'poolSnapshot').length;
     assert.ok(polls >= 20 && polls <= 26, `live: ~every 2.5 s (${polls})`);
     b.snap = snapshot([]);
     await page.advance(5_000);
-    const before = page.calls.length;
+    const before = snapCalls(page);
     await page.advance(60_000);
-    const idle = page.calls.length - before;
+    const idle = snapCalls(page) - before;
     assert.ok(idle >= 6 && idle <= 8, `idle: ~every 8 s (${idle})`);
     assert.equal(page.$('actEmpty')!.hidden, false);
-    const sent = page.calls.length;
+    const sent = snapCalls(page);
     b.hang = true;
     await page.advance(120_000);
     // One poll at a time; the bridge gives up on a silent call after 35 s.
-    assert.ok(page.calls.length - sent <= 3, `stalled worker: ${page.calls.length - sent} polls in 120 s`);
+    assert.ok(snapCalls(page) - sent <= 3, `stalled worker: ${snapCalls(page) - sent} polls in 120 s`);
     assert.ok(page.timers().timeouts <= 2);
     assert.deepEqual(page.errors, []);
   });
@@ -431,36 +442,41 @@ describe('Claude panel page', () => {
   it('leaves unchanged rows alone: typed token, open details and hover survive polls', async () => {
     const { b, invoke } = bridge();
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
-    const rowA = page.doc.querySelector('tr[data-key=acc:a]');
+    const rowA = page.doc.querySelector('[data-key=acc:a]');
     await page.click(btn(page, 'more', 'b'));
     const input = page.$('tokv-b')!;
     input.value = 'half-typed';
     const writes = page.doc.stats.innerHTMLWrites;
     await page.advance(10_000);
-    assert.equal(page.doc.querySelector('tr[data-key=acc:a]'), rowA, 'same node');
+    assert.equal(page.doc.querySelector('[data-key=acc:a]'), rowA, 'same node');
     assert.equal(page.$('tokv-b'), input);
     assert.equal(input.value, 'half-typed');
     assert.ok(page.doc.stats.innerHTMLWrites - writes <= 1, 'identical polls write (almost) nothing');
     b.snap.accounts[0].tokens.window5h.output = 99_000;
     await page.advance(3_000);
-    assert.notEqual(page.doc.querySelector('tr[data-key=acc:a]'), rowA, 'a changed row is rebuilt');
+    assert.notEqual(page.doc.querySelector('[data-key=acc:a]'), rowA, 'a changed row is rebuilt');
     assert.equal(page.$('tokv-b'), input, 'its neighbours are not');
-    assert.match(page.doc.querySelector('tr[data-key=acc:a]')!.textContent, /99\.0k out/);
+    assert.match(page.doc.querySelector('[data-key=acc:a]')!.textContent, /99\.0k out/);
   });
 
   it('wires every seat button to its action', async () => {
     const { invoke } = bridge();
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
-    const last = () => page.calls.filter((c) => c.action !== 'poolSnapshot').pop();
+    const last = () => actionCalls(page).pop();
     const expect = async (el: ReturnType<typeof btn>, action: string, args: Record<string, unknown>) => {
       await page.click(el);
       assert.deepEqual(last(), { action, args }, action);
     };
     await expect(btn(page, 'login', 'c'), 'loginAccount', { id: 'c' });
     assert.match(page.$('flash')!.textContent, /Login window opened for C/);
+    // Everything but Log in and the order arrows lives in the seat's menu.
+    assert.equal(btn(page, 'refresh', 'a'), null, 'menu closed');
+    await page.click(btn(page, 'more', 'a'));
     await expect(btn(page, 'refresh', 'a'), 'refreshUsage', { id: 'a' });
     await expect(btn(page, 'test', 'a'), 'testConnection', { accountId: 'a' });
     assert.match(page.$('flash')!.textContent, /A answered: OK/);
+    await page.click(btn(page, 'more', 'a'));
+    assert.equal(btn(page, 'refresh', 'a'), null, 'menu closed again');
     await page.click(btn(page, 'flash-close'));
     assert.equal(page.$('flash')!.textContent, '');
 
@@ -502,8 +518,9 @@ describe('Claude panel page', () => {
   it('wires the toolbar, the stop button and the history', async () => {
     const { b, invoke } = bridge();
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
-    const last = () => page.calls.filter((c) => c.action !== 'poolSnapshot').pop();
+    const last = () => actionCalls(page).pop();
 
+    await page.click(page.$('runsBtn'));
     await page.click(btn(page, 'stop', 'turn:x'));
     assert.equal(last(), undefined, 'first click only arms');
     await page.click(btn(page, 'stop', 'turn:x'));
@@ -540,6 +557,7 @@ describe('Claude panel page', () => {
     assert.equal(page.doc.querySelectorAll('#hist tr').length, 1);
 
     b.fail = 'seat is busy';
+    await page.click(btn(page, 'more', 'a'));
     await page.click(btn(page, 'refresh', 'a'));
     assert.match(page.$('flash')!.textContent, /seat is busy/);
     assert.equal(btn(page, 'refresh', 'a')!.disabled, false, 'a failed action re-enables its button');
@@ -559,6 +577,7 @@ describe('Claude panel page', () => {
     };
     const { invoke } = bridge(snapshot([turn]));
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
+    await page.click(page.$('runsBtn'));
     const row = () => page.doc.querySelector('tr[data-key=a:eturn:1]')!.textContent.replace(/\s+/g, ' ');
     assert.match(row(), /Developer ← pm · t-84410d5e Fix the crash/);
     assert.match(row(), /tools/, 'waiting on its tools');
@@ -577,9 +596,172 @@ describe('Claude panel page', () => {
     assert.deepEqual(page.errors, []);
   });
 
+  it('says which seat a new conversation gets next, and why', async () => {
+    const { b, invoke } = bridge();
+    const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
+    assert.match(page.$('seatFacts')!.textContent, /Next: none usable/);
+    assert.match(page.$('seatFacts')!.textContent, /Strategy: fill in order · switch at 90%/);
+    (b.snap as Record<string, unknown>).next = { id: 'a', label: 'A', why: 'resets in 40m, 62% left' };
+    b.snap.settings.strategy = 'drain';
+    await page.advance(10_000);
+    assert.match(page.$('seatFacts')!.textContent, /Next: A · resets in 40m, 62% left/);
+    assert.match(page.$('seatFacts')!.textContent, /Strategy: use it or lose it/);
+    assert.equal(page.$('strategy')!.value, 'drain');
+    assert.deepEqual(page.errors, []);
+  });
+
   it('flags a running turn that stopped sending events', async () => {
     const { invoke } = bridge(snapshot([liveTurn({ lastEventAt: T0 - 120_000 })]));
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
+    await page.click(page.$('runsBtn'));
     assert.match(page.doc.querySelector('tr[data-key=a:turn:x]')!.textContent, /stalled/);
+  });
+});
+
+// ---- the Usage zone ----------------------------------------------------------
+
+describe('Claude panel usage zone', () => {
+  async function usagePage() {
+    const { UsageStore } = await import('../src/usage/history.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const store = new UsageStore(join(mkdtempSync(join(tmpdir(), 'alfred-usage-wv-')), 'u.json'), () => T0);
+    store.add(T0 - 3_600_000, 'a', 'claude-opus-5-5', 'alfred', [3, 10, 0, 60_000, 200_000, 900]);
+    store.add(T0 - 26 * 3_600_000, 'b', 'claude-haiku-4-5-20251001', '', [1, 5, 1000, 0, 0, 50]);
+    store.add(T0 - 2 * 3_600_000, 'unknown', 'claude-opus-5-5', 'engine', [1, 2, 50_000, 0, 0, 30]);
+    const scan = { running: false, backfilled: true, filesDone: 3, filesTotal: 3, lastScanAt: T0 };
+    const day = (at: number) => { const d = new Date(at); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const capacity = {
+      since: T0 - 2 * 86_400_000,
+      rows: [{ day: day(T0), account: 'a', window: 'five_hour', n: 2, pct: 90, usedTok: 1000, usedUsd: 2, estN: 2, fullTok: 2500, fullUsd: 5, estUsedTok: 1000, estUsedUsd: 2 }],
+    };
+    const view = { ok: true, ...store.view({ scan, seats: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], plans: { a: { label: 'Max 20x', monthlyUsd: 200 } } }), version: 'v1', capacity };
+    let usageCalls = 0;
+    const { invoke } = bridge(snapshot([liveTurn({ tokens: [10, 2000, 30_000, 1200], cost: [0.00004, 0.016, 0.006, 0.024] })]));
+    const page = await runPage(
+      renderDashboard(),
+      async (action, args) => {
+        if (action !== 'usageHistory') return invoke(action, args);
+        usageCalls++;
+        return args.since === 'v1' ? { ok: true, unchanged: true, version: 'v1', scan } : structuredClone(view);
+      },
+      { startAt: T0 },
+    );
+    return { page, calls: () => usageCalls };
+  }
+  const hits = (page: Awaited<ReturnType<typeof runPage>>) => page.doc.querySelectorAll('#useChart rect.hit').length;
+
+  it('shows one chart at a time: overview, by seat, hourly, daily, cost', async () => {
+    const { page } = await usagePage();
+    assert.deepEqual(page.errors, []);
+    assert.deepEqual(page.parseIssues, []);
+    assert.equal(page.$('useBody')!.hidden, false);
+    // Overview, stacked by seat, since the first day with data (at least 7 days).
+    assert.equal(btn(page, 'uview', 'overview')!.className, 'on');
+    assert.equal(hits(page), 7);
+    await page.type(page.$('usePeriod'), '30');
+    assert.equal(hits(page), 30);
+    await page.type(page.$('usePeriod'), '0');
+    assert.equal(hits(page), 7);
+    assert.equal(page.doc.querySelectorAll('#useChart svg').length, 1, 'one chart');
+    assert.match(page.$('useLegend')!.textContent, /A.*B.*unattributed \(before tracking\)/);
+    const strip = page.$('useStrip')!.textContent.replace(/\s+/g, ' ');
+    assert.match(strip, /Input/);
+    assert.match(strip, /Cache write/);
+    assert.match(strip, /Cache read/);
+    assert.match(strip, /Output/);
+    assert.match(strip, /cache r\/w/);
+    assert.match(strip, /saved|cache costs/);
+    assert.match(strip, /month/);
+    await page.click(btn(page, 'uview', 'byseat'));
+    assert.equal(page.doc.querySelectorAll('#useChart button.mult').length, 3, 'A, B and unknown');
+    const multA = btn(page, 'usel', 'a')!;
+    assert.match(multA.getAttribute('title')!, /Max 20x/);
+    assert.match(multA.getAttribute('title')!, /Cache read: 200\.0k tok/);
+    await page.click(btn(page, 'uview', 'hourly'));
+    assert.equal(hits(page), 24);
+    assert.match(page.$('useLegend')!.textContent, /Input.*Cache write.*Cache read.*Output/);
+    await page.click(btn(page, 'uview', 'daily'));
+    assert.equal(hits(page), 7);
+    await page.click(btn(page, 'uview', 'cost'));
+    const cost = page.$('useChart')!.textContent.replace(/\s+/g, ' ');
+    assert.match(cost, /Cache write \(5m [^)]+ · 1h 60\.0k\)/);
+    assert.match(cost, /Cache reads saved/);
+    assert.match(cost, /Cache write premium/);
+    assert.match(cost, /Saved by the cache|The cache costs more than it saves/);
+    assert.equal(page.$('useLegend')!.hidden, true);
+    // The live turn's API $ with its four-line breakdown, in the running drop-down.
+    await page.click(page.$('runsBtn'));
+    const cell = page.doc.querySelector('tr[data-key=a:turn:x] td.r span[title]')!;
+    assert.match(cell.textContent, /\$0\.05/);
+    assert.match(cell.getAttribute('title')!, /Cache write: 2\.0k tok/);
+    assert.match(page.$('stats')!.textContent, /today/);
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('selects a seat from its small chart, switches tokens / $ and the period', async () => {
+    const { page } = await usagePage();
+    await page.click(btn(page, 'uview', 'byseat'));
+    await page.click(btn(page, 'usel', 'b'));
+    assert.equal(btn(page, 'uview', 'daily')!.className, 'on', 'a seat opens in Daily');
+    assert.equal(page.$('useAcc')!.value, 'b');
+    assert.match(page.$('useScope')!.textContent, /^B/);
+    await page.click(btn(page, 'umetric', 'cost'));
+    assert.equal(btn(page, 'umetric', 'cost')!.className, 'on');
+    assert.match(page.$('useChart')!.innerHTML, /\$/, 'the axis is in dollars');
+    await page.type(page.$('usePeriod'), '7');
+    assert.equal(hits(page), 7);
+    await page.click(btn(page, 'uview', 'hourly'));
+    await page.type(page.$('usePeriod'), '48');
+    assert.equal(hits(page), 48);
+    await page.click(btn(page, 'uview', 'daily'));
+    assert.equal(hits(page), 7, 'each view keeps its own period');
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('shows the capacity left unused at each reset, as an estimate', async () => {
+    const { page } = await usagePage();
+    await page.click(btn(page, 'tab', 'usage'));
+    assert.equal(page.$('pane-usage')!.hidden, false);
+    assert.equal(page.$('pane-seats')!.hidden, true);
+    await page.click(btn(page, 'uview', 'capacity'));
+    assert.equal(page.$('ucapSeg')!.hidden, false);
+    const legend = page.$('useLegend')!.textContent;
+    assert.match(legend, /2 resets · 45% used on average · lost ≈ \$3\.0 \/ 1\.5k tok/);
+    assert.match(legend, /estimate/);
+    assert.match(page.$('useScope')!.textContent, /5h windows · estimate/);
+    assert.equal(hits(page), 7);
+    await page.click(btn(page, 'ucap', 'seven_day'));
+    assert.match(page.$('useChart')!.textContent, /No weekly reset seen in this period yet/);
+    await page.click(btn(page, 'tab', 'seats'));
+    assert.equal(page.$('pane-seats')!.hidden, false);
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('polls slowly and leaves the zone alone while the data is the same', async () => {
+    const { page, calls } = await usagePage();
+    assert.equal(calls(), 1);
+    const svg = page.$('useChart')!.firstElementChild;
+    await page.advance(29_000);
+    assert.equal(calls(), 1, 'nothing before 30 s');
+    await page.advance(2_000);
+    assert.equal(calls(), 2);
+    assert.equal(page.$('useChart')!.firstElementChild, svg, 'unchanged version: same nodes');
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('draws the chart at the size of its box', async () => {
+    const { page } = await usagePage();
+    const box = page.$('useChart')! as unknown as { clientWidth: number; clientHeight: number };
+    box.clientWidth = 480;
+    box.clientHeight = 260;
+    // The window resize listener sits on the document in this vm.
+    page.doc.body.dispatchEvent(new (await import('./miniDom.js')).DomEvent('resize'));
+    await page.advance(200);
+    const svg = page.$('useChart')!.firstElementChild!;
+    assert.equal(svg.getAttribute('width'), '480');
+    assert.equal(svg.getAttribute('height'), '260');
+    assert.deepEqual(page.errors, []);
   });
 });

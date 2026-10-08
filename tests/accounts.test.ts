@@ -98,6 +98,7 @@ describe('selection', () => {
 
   it('fill: sticks to the preferred seat until the threshold, then most headroom', () => {
     const pool = makePool(3);
+    pool.updateSettings({ strategy: 'fill' }); // the default is drain since "use it or lose it"
     const [a, b, c] = pool.list();
     pool.setUsage(a.id, usageAt(50));
     pool.setUsage(b.id, usageAt(70));

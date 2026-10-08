@@ -18,6 +18,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ChatChunk, ChatRequest, SessionEvent, SessionTurnRequest, SessionUsage } from '@alfred/sdk';
 import type { RunState } from '../session/runner.js';
+import { priceTokens } from '../usage/pricing.js';
 
 export type ActivityKind = 'chat' | 'request' | 'run';
 export type ActivityStatus =
@@ -68,6 +69,12 @@ export type ActivityItem = {
   lastEventAt: number;
   tokensIn?: number;
   tokensOut?: number;
+  /** input, cache write, cache read, output (main loop) */
+  tokens?: [number, number, number, number];
+  /** API-equivalent USD of `tokens`, at the served model's list price (usage/pricing.ts). */
+  cost?: [number, number, number, number];
+  /** Engine requests report only cached / uncached prompt: the uncached part is counted as cache write. */
+  costApprox?: boolean;
   contextUsed?: number;
   contextWindow?: number;
   subagents: SubagentView[];
@@ -334,6 +341,9 @@ export class ActivityBoard {
     if (input !== undefined) t.tokensIn = input;
     if (u.outputTokens !== undefined) t.tokensOut = u.outputTokens;
     if (u.contextWindow) t.contextWindow = u.contextWindow;
+    if (input !== undefined || u.outputTokens !== undefined) {
+      t.tokens = [u.inputTokens ?? 0, u.cacheWriteTokens ?? 0, u.cacheReadTokens ?? 0, u.outputTokens ?? 0];
+    }
   }
 
   private capSubagents(t: Tracked): void {
@@ -430,6 +440,12 @@ export class ActivityBoard {
             it.tokensOut = u.outputTokens;
             t.tokensOut = (t.tokensOut ?? 0) + u.outputTokens;
           }
+          if (u) {
+            const cu = u as { cachedInputTokens?: number; uncachedInputTokens?: number };
+            const prev = t.tokens ?? [0, 0, 0, 0];
+            t.tokens = [prev[0], prev[1] + (cu.uncachedInputTokens ?? 0), prev[2] + (cu.cachedInputTokens ?? 0), prev[3] + (u.outputTokens ?? 0)];
+            t.costApprox = true;
+          }
           for (const call of c.response.toolCalls ?? []) {
             if (!it.tools.includes(call.name)) it.tools.push(call.name);
             t.lastTool = call.name;
@@ -517,6 +533,7 @@ export class ActivityBoard {
       const { subByToolUse: _a, toolUseId: _b, stop: _c, stopRequested: _d, ...view } = t;
       return {
         ...view,
+        ...(t.tokens ? { tokens: [...t.tokens] as [number, number, number, number], cost: priceTokens(t.servedModel || t.model || '', t.tokens) } : {}),
         subagents: t.subagents.map((s) => ({ ...s })),
         iterationList: t.iterationList?.map((i) => ({ ...i, tools: [...i.tools] })),
       };
@@ -554,9 +571,14 @@ export function runItem(run: RunState, now = Date.now()): ActivityItem | undefin
     lastEventAt: ended ?? now,
     tokensIn: tokens ? tokens.input + tokens.cacheRead + tokens.cacheWrite : undefined,
     tokensOut: tokens?.output,
+    ...(tokens ? runCost(run.request.model ?? '', [tokens.input, tokens.cacheWrite, tokens.cacheRead, tokens.output]) : {}),
     subagents: [],
     canStop: run.status === 'running',
   };
+}
+
+function runCost(model: string, t: [number, number, number, number]): Pick<ActivityItem, 'tokens' | 'cost'> {
+  return { tokens: t, cost: priceTokens(model, t) };
 }
 
 type Instrumentable = {

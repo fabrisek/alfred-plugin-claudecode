@@ -25,6 +25,7 @@ import {
 } from './session/runner.js';
 import { SessionIndex } from './session/sessions.js';
 import { registerSessionTools } from './session/tools.js';
+import { registerUsageHistory } from './usage/register.js';
 import { ensureSharedSessionDirs } from './accounts/sharedSessions.js';
 import {
   ClaudeSessionAdapter,
@@ -210,6 +211,7 @@ let poolRef: AccountPool | null = null;
 let runnerRef: SessionRunner | null = null;
 let adapterRef: ClaudeSessionAdapter | null = null;
 let providerRef: ClaudeCodeProvider | null = null;
+let usageHistoryRef: { stop(): void } | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
@@ -276,6 +278,8 @@ const plugin: AlfredPlugin = {
     instrumentProvider(provider, activity, pool);
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
+    // Token history for the panel's Usage section (usage/), from the transcripts.
+    usageHistoryRef = registerUsageHistory(ctx, pool, sessionIndex);
 
     // Full Claude Code agent sessions, delegated by Alfred agents.
     const runner = new SessionRunner({
@@ -314,7 +318,7 @@ const plugin: AlfredPlugin = {
           .list()
           .map((r) => runItem(r, now))
           .filter((r): r is ActivityItem => r !== undefined);
-        return { ...snapshot(pool, cli), activity: activity.view(runs) };
+        return { ...snapshot(pool, cli), next: pool.nextPick(firstModel(cfg.modelsRaw)), activity: activity.view(runs) };
       }),
     );
 
@@ -537,6 +541,8 @@ const plugin: AlfredPlugin = {
     refresher = null;
     poolRef?.flush();
     poolRef = null;
+    usageHistoryRef?.stop();
+    usageHistoryRef = null;
   },
 };
 

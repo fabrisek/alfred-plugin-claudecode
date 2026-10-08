@@ -20,9 +20,10 @@ import {
   type AccountUsage,
   type RateLimitInfo,
 } from './usage.js';
+import { drainReason, drainScore } from './drain.js';
 
 export type AuthKind = 'login' | 'token';
-export type Strategy = 'fill' | 'spread';
+export type Strategy = 'fill' | 'spread' | 'drain';
 
 export type Account = {
   id: string;
@@ -58,6 +59,8 @@ export type AccountRuntime = {
 
 export type PoolSettings = {
   strategy: Strategy;
+  /** Set once the saved strategy went through the `drain` default (see withDrainDefault). */
+  drainDefaulted?: boolean;
   /** Percent (0-100) of any relevant window at which `fill` moves on. */
   threshold: number;
   /** Background usage poll interval, minutes. */
@@ -123,7 +126,7 @@ type StateFile = {
 
 type SecretsFile = { tokens: Record<string, string> };
 
-export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'fill', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 };
+export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'drain', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 };
 
 /** How long a seat sits out after a bare 429 (no quota rejection, no reset time). */
 export const THROTTLE_BACKOFF_MS = 20_000;
@@ -185,7 +188,7 @@ export class AccountPool {
         version: 1,
         accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
         runtime: raw.runtime && typeof raw.runtime === 'object' ? raw.runtime : {},
-        settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
+        settings: withDrainDefault({ ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) }),
         recent: Array.isArray(raw.recent) ? raw.recent : [],
         tokens: raw.tokens && typeof raw.tokens === 'object' ? raw.tokens : {},
         servedModels:
@@ -263,7 +266,7 @@ export class AccountPool {
 
   updateSettings(patch: Partial<PoolSettings>): PoolSettings {
     const s = this.state.settings;
-    if (patch.strategy === 'fill' || patch.strategy === 'spread') s.strategy = patch.strategy;
+    if (patch.strategy === 'fill' || patch.strategy === 'spread' || patch.strategy === 'drain') s.strategy = patch.strategy;
     if (typeof patch.threshold === 'number' && Number.isFinite(patch.threshold)) {
       s.threshold = Math.min(100, Math.max(1, Math.round(patch.threshold)));
     }
@@ -604,6 +607,13 @@ export class AccountPool {
    *   constrains this model; if none, the one with the most headroom (ties:
    *   earliest reset).
    * - `spread`: least-utilised first (ties: fewer in-flight, then priority).
+   * - `drain` ("use it or lose it"): the seat under the threshold with the
+   *   most headroom per hour left before its next reset (accounts/drain.ts);
+   *   ties: the user's order. Busy seats overflow as with `fill`.
+   *
+   * Either way a conversation already on a seat stays there while that seat
+   * is under the threshold (`prefer`): the strategy only picks the seat of a
+   * new conversation or session.
    *
    * A pinned seat is tried first when usable; otherwise the pool takes over.
    */
@@ -635,6 +645,19 @@ export class AccountPool {
       reset: blockingReset(this.runtime(a.id).usage, args.model, threshold, now) ?? Infinity,
       busy: this.inFlightOf(a.id),
     }));
+    if (strategy === 'drain') {
+      const under = scored
+        .filter((s) => s.pct < threshold)
+        .map((s) => ({ ...s, drain: drainScore(this.runtime(s.a.id).usage, args.model, threshold, now) }))
+        // Stable sort: equal scores keep the user's order.
+        .sort((x, y) => y.drain.score - x.drain.score);
+      if (under.length > 0) {
+        const cap = this.state.settings.fillMaxInFlight;
+        const free = cap > 0 ? under.find((s) => s.busy < cap) : under[0];
+        if (free) return { account: free.a };
+        return { account: [...under].sort((x, y) => x.busy - y.busy)[0].a };
+      }
+    }
     if (strategy === 'fill') {
       const under = scored.filter((s) => s.pct < threshold);
       if (under.length > 0) {
@@ -651,6 +674,29 @@ export class AccountPool {
       (x, y) => x.pct - y.pct || x.reset - y.reset || x.busy - y.busy || x.a.priority - y.a.priority,
     );
     return { account: scored[0].a };
+  }
+
+  /**
+   * The seat a new conversation would get now, and why, for the panel. Same
+   * choice as {@link pick} without affinity.
+   */
+  nextPick(model: string): { id: string; label: string; why: string } | null {
+    const now = this.now();
+    const { threshold, strategy } = this.state.settings;
+    const r = this.pick({ model });
+    if (!r.account) return null;
+    const a = r.account;
+    const usage = this.runtime(a.id).usage;
+    const pct = relevantPercent(usage, model, now);
+    const why =
+      strategy === 'drain'
+        ? drainReason(drainScore(usage, model, threshold, now), threshold, now)
+        : strategy === 'spread'
+          ? `least used, ${Math.round(pct)}%`
+          : pct < threshold
+            ? `first in order under ${threshold}%`
+            : `most headroom, ${Math.round(pct)}%`;
+    return { id: a.id, label: a.label, why };
   }
 
   private exhaustedMessage(model: string, exclude: Set<string>, now: number): string {
@@ -684,4 +730,14 @@ function slug(s: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 32);
+}
+
+/**
+ * `drain` became the default strategy. A state saved before it says `fill`
+ * because `fill` was the default then, not necessarily a choice: it moves to
+ * `drain` once, and is marked so that a later `fill` chosen in the panel stays.
+ */
+function withDrainDefault(s: PoolSettings): PoolSettings {
+  if (s.drainDefaulted) return s;
+  return { ...s, strategy: s.strategy === 'fill' ? 'drain' : s.strategy, drainDefaulted: true };
 }
