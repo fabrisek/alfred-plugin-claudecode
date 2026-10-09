@@ -28,6 +28,7 @@ import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery, splitModel } from '../ClaudeCodeProvider.js';
 import { seatForResume, SESSION_ID_RE, type SessionIndex } from '../session/sessions.js';
 import { ClaudeEventMapper, totalsOf, turnUsage, type SessionTotals } from './claudeEventMap.js';
+import type { CliProcessTracker } from './processTracker.js';
 import { AsyncQueue, TurnRegistry } from './turns.js';
 
 /** Least → most permissive; what the conversation selector offers (plan §5.4). */
@@ -211,7 +212,17 @@ export type ClaudeSessionAdapterOptions = {
   now?: () => number;
   /** Test seam; defaults to {@link HEARTBEAT_MS}. */
   heartbeatMs?: number;
+  /** Records every CLI process, so a crashed gateway's orphans are killed on the next start. */
+  tracker?: CliProcessTracker;
 };
+
+/** Longest argv value logged as is; longer ones (prompts, JSON) are cut. */
+const LOG_ARG_MAX = 40;
+
+/** A CLI command line for the log: long values cut to their head and length. */
+export function argvForLog(args: readonly string[]): string {
+  return args.map((a) => (a.length > LOG_ARG_MAX ? `${a.slice(0, LOG_ARG_MAX)}…(${a.length})` : a)).join(' ');
+}
 
 export class ClaudeSessionAdapter {
   private readonly turns = new TurnRegistry<LiveTurn>();
@@ -486,6 +497,15 @@ export class ClaudeSessionAdapter {
     if (a.sessionId) options.resume = a.sessionId;
     else if (a.newId) options.sessionId = a.newId;
     if (cli.path) options.pathToClaudeCodeExecutable = cli.path;
+    if (this.opts.tracker) {
+      // Own spawn: the SDK then forwards no stderr, so the tracker does.
+      options.spawnClaudeCodeProcess = this.opts.tracker.spawner(
+        (d) => {
+          stderrTail = (stderrTail + d).slice(-STDERR_TAIL);
+        },
+        (args) => logger.debug?.('claude session argv', { turnId: req.turnId, argv: argvForLog(args) }),
+      );
+    }
 
     let stalled = false;
     const startTimer = setTimeout(() => {

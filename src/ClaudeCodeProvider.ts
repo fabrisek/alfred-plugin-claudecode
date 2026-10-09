@@ -14,6 +14,7 @@ import { Deadline, isAbortLike, noopLogger } from '@alfred/provider-openai-compa
 import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from './accounts/pool.js';
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
+import type { CliProcessTracker } from './agentSession/processTracker.js';
 import { ToolCallCutter } from './toolCallCutter.js';
 import {
   ASSISTANT_SLOT,
@@ -78,6 +79,14 @@ export type ClaudeCodeProviderOptions = {
    * runs in its own one-shot process.
    */
   sessionsDir?: string;
+  /** Records every CLI process, so a crashed gateway's orphans are killed on the next start. */
+  tracker?: CliProcessTracker;
+  /**
+   * Every seat shares one session store (accounts/sharedSessions.ts): a
+   * conversation whose seat is out continues the same session on the next
+   * one (`--resume`), sending only what is new.
+   */
+  crossSeat?: () => boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -164,6 +173,10 @@ type QueryOptions = {
   extraArgs?: Record<string, string | null>;
   /** Continue this Claude Code session (`--resume`). */
   resume?: string;
+  /** With `resume`: drop the transcript entries after this one. */
+  resumeSessionAt?: string;
+  /** Our own spawn (pid file for orphan reaping), see agentSession/processTracker.ts. */
+  spawnClaudeCodeProcess?: ReturnType<CliProcessTracker['spawner']>;
 };
 
 // Every built-in Claude Code tool, listed so `disallowedTools` strips them from
@@ -570,6 +583,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     const fullContent = (): SdkInputBlock[] =>
       system.volatile ? [{ type: 'text', text: contextReminder(system.volatile) }, ...built.content] : built.content;
     if (this.opts.cli.path) options.pathToClaudeCodeExecutable = this.opts.cli.path;
+    if (this.opts.tracker) options.spawnClaudeCodeProcess = this.opts.tracker.spawner();
     let effort: string | null = null;
     if (this.opts.cli.native) {
       // The deny list above can't keep up with new CLI tools (PowerShell,
@@ -603,6 +617,7 @@ export class ClaudeCodeProvider implements LLMProvider {
           accountId: account.id,
           system: built.systemPrompt,
           messages: nonSystem,
+          crossSeat: this.opts.crossSeat?.() ?? false,
         });
         if (plan.kind === 'continue') {
           record = sessions.record(sessionKey) as EngineSessionRecord;
@@ -650,7 +665,20 @@ export class ClaudeCodeProvider implements LLMProvider {
       // The launch system prompt, not this request's: it heads the cached prefix.
       if (record.launchSystem) sessionOptions.systemPrompt = record.launchSystem;
       else delete sessionOptions.systemPrompt;
-      if (sessionMode === 'resume' && record.sessionId) sessionOptions.resume = record.sessionId;
+      if (sessionMode === 'resume' && record.sessionId) {
+        sessionOptions.resume = record.sessionId;
+        // Back to the last reply Alfred kept: a failed or killed request may
+        // have left its delta (or an API error) in the transcript.
+        if (record.lastUuid) sessionOptions.resumeSessionAt = record.lastUuid;
+        if (record.accountId !== account.id) {
+          this.log.info('continuing the Claude session on another seat', {
+            thread: sessionKey,
+            from: record.accountId,
+            to: account.id,
+            sessionId: record.sessionId,
+          });
+        }
+      }
       const q = query({ prompt: input, options: sessionOptions }) as unknown as LiveQuery;
       live = new LiveSession(sessionKey, account.id, model, effort, q, input as PushQueue<unknown>, sessionController);
       sessions.add(live);
@@ -661,6 +689,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     // one is interrupted on Stop (the session lives on) and closed on a
     // silent timeout (it is wedged).
     let requestAborted = false;
+    let stopFallback: ReturnType<typeof setTimeout> | undefined;
     const onDeadline = (): void => {
       requestAborted = true;
       if (!live) {
@@ -668,7 +697,14 @@ export class ClaudeCodeProvider implements LLMProvider {
         return;
       }
       if (deadline.userAborted) {
-        void Promise.resolve(live.query.interrupt?.()).catch(() => undefined);
+        const stopped = live;
+        void Promise.resolve(stopped.query.interrupt?.()).catch(() => undefined);
+        // A CLI that never answers the interrupt would hold the turn (and its
+        // parent's Stop) forever: close its process; the record stays.
+        stopFallback = setTimeout(() => {
+          if (!stopped.dead) sessions?.close(stopped.key, 'stop: no result after the interrupt');
+        }, INTERRUPT_SETTLE_MS);
+        stopFallback.unref?.();
       } else if (sessions) {
         sessions.close(live.key, 'no output within the request timeout');
       }
@@ -722,6 +758,10 @@ export class ClaudeCodeProvider implements LLMProvider {
     let cutAfterToolCall = false;
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
+    // The seat failed (limit, throttle, auth), not the session.
+    let seatFailed = false;
+    // Transcript uuid of this reply's last assistant entry.
+    let replyUuid: string | undefined;
 
     const buildResponse = (): ChatResponse => ({
       content: assembledContent.trim(),
@@ -731,6 +771,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     });
     const fail = (detail: string): AccountFailure => {
       const c = classifyFailure(detail, sdkError, rejectedUntil);
+      seatFailed = c.kind === 'limit' || c.kind === 'throttle' || c.kind === 'auth';
       if (c.kind === 'limit') {
         const until =
           c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? Date.now() + 30 * 60_000;
@@ -857,6 +898,8 @@ export class ClaudeCodeProvider implements LLMProvider {
             continue;
           }
           if (typeof am.message.model === 'string' && am.message.model) servedModel = am.message.model;
+          const uuid = (am as { uuid?: unknown }).uuid;
+          if (typeof uuid === 'string' && uuid) replyUuid = uuid;
           // Fallback: if partial streaming yielded nothing, reconstruct from the
           // complete assistant message.
           if (!sawStreamedText) {
@@ -964,9 +1007,16 @@ export class ClaudeCodeProvider implements LLMProvider {
         if (live && !gotResult) {
           // Interrupt the turn but keep the process: the session keeps what
           // was generated up to here, and receives the tool results next.
-          gotResult = await this.interruptTurn(live, iterator, (u) => {
-            stepUsage = { ...stepUsage, ...u };
-          });
+          gotResult = await this.interruptTurn(
+            live,
+            iterator,
+            (u) => {
+              stepUsage = { ...stepUsage, ...u };
+            },
+            (uuid) => {
+              replyUuid = uuid;
+            },
+          );
         } else if (!live) {
           try {
             controller.abort();
@@ -1023,12 +1073,26 @@ export class ClaudeCodeProvider implements LLMProvider {
       // detaches our listener from the host's long-lived abort signal.
       deadline.signal.removeEventListener('abort', onDeadline);
       deadline.dispose();
+      if (stopFallback) clearTimeout(stopFallback);
       if (!live && iterator && !gotResult) {
         // One-shot process left mid-stream: make sure it is gone.
         void Promise.resolve(iterator.return?.()).catch(() => undefined);
       }
       if (live && sessions && record) {
-        if (failed || !gotResult) {
+        const userStopped = requestAborted && deadline.userAborted;
+        if (failed && seatFailed && persistent && record.sessionId && (this.opts.crossSeat?.() ?? false)) {
+          // The seat is out, not the session: the next seat resumes it at the
+          // last reply Alfred kept and sends this request's delta again.
+          sessions.close(live.key, `seat failed: ${failed.detail.slice(0, 120)}`);
+        } else if (!failed && userStopped && (!gotResult || !replyUuid)) {
+          // Stopped before the CLI settled: the process goes, the session
+          // stays. The record still describes what the session held before
+          // this request, so the next one resumes it (`--resume`) and sends
+          // what is new since then, or starts afresh if Alfred's history
+          // moved on differently.
+          // (Or it settled with nothing of the reply in the transcript.)
+          sessions.close(live.key, 'stopped before the reply settled');
+        } else if (failed || !gotResult) {
           // Unknown state: the next request starts a fresh session.
           sessions.close(live.key, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
           sessions.forget(live.key);
@@ -1040,6 +1104,8 @@ export class ClaudeCodeProvider implements LLMProvider {
             ...nonSystem.map((m) => (m.role === 'assistant' ? ASSISTANT_SLOT : messageFingerprint(m))),
             ASSISTANT_SLOT,
           ];
+          record.interruptedTail = userStopped;
+          record.lastUuid = replyUuid;
           sessions.save(record);
           const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0;
           if (req.session?.task && (requestAborted || !calledTool || TASK_END_CALL.test(rawText))) {
@@ -1097,6 +1163,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     live: LiveSession,
     iterator: AsyncIterator<unknown>,
     onUsage: (u: SdkUsage) => void,
+    onAssistant: (uuid: string) => void = () => {},
   ): Promise<boolean> {
     try {
       await live.query.interrupt?.();
@@ -1109,6 +1176,10 @@ export class ClaudeCodeProvider implements LLMProvider {
         if (step.done) return false;
         const m = step.value as SdkMessage;
         if (m.type === 'result') return true;
+        if (m.type === 'assistant') {
+          const uuid = (m as { uuid?: unknown; error?: unknown }).uuid;
+          if (typeof uuid === 'string' && uuid && !(m as { error?: unknown }).error) onAssistant(uuid);
+        }
         if (m.type === 'stream_event') {
           const ev = (m as Extract<SdkMessage, { type: 'stream_event' }>).event;
           if (ev.type === 'message_delta') {
@@ -1127,6 +1198,22 @@ export class ClaudeCodeProvider implements LLMProvider {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /**
+   * The host stopped this thread's turn: nothing will feed it for now. A
+   * sub-agent's idle process is closed at once instead of after its idle
+   * timeout; its record (and the CLI transcript) stay, so the next message to
+   * that thread resumes the same session. A top-level conversation keeps its
+   * process warm for the user's next message. A request still in flight ends
+   * through its own abort.
+   */
+  async endSession(session: { key?: unknown; task?: unknown }, reason: string): Promise<void> {
+    const key = typeof session?.key === 'string' ? session.key : '';
+    if (!key || !this.sessions) return;
+    const live = this.sessions.getLive(key);
+    if (!live || live.busy || session.task !== true) return;
+    this.sessions.close(key, reason === 'stopped' ? 'sub-agent stopped' : `thread ended: ${reason}`);
   }
 
   /** Close every live engine session (plugin deactivation). */

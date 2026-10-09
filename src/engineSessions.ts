@@ -61,6 +61,19 @@ export type EngineSessionRecord = {
   currentSystem: string;
   /** Fingerprints of the non-system messages the session holds, {@link ASSISTANT_SLOT} for its replies. */
   history: string[];
+  /**
+   * The session's last reply was cut by a Stop. The host may drop that reply
+   * from its history (it usually does) or keep what had streamed: both
+   * continue the session.
+   */
+  interruptedTail?: boolean;
+  /**
+   * Transcript entry (CLI uuid) of the session's last reply that Alfred kept:
+   * a resume truncates there (`resumeSessionAt`), so whatever a failed or
+   * killed request appended after it (its delta, an API error) is dropped and
+   * the delta is sent again, once.
+   */
+  lastUuid?: string;
   updatedAt: number;
 };
 
@@ -78,19 +91,27 @@ export type SessionPlan =
  */
 export function planSession(
   rec: EngineSessionRecord | undefined,
-  req: { accountId: string; system: string; messages: Message[] },
+  req: { accountId: string; system: string; messages: Message[]; crossSeat?: boolean },
 ): SessionPlan {
   if (!rec) return { kind: 'fresh', reason: 'new' };
   if (!rec.sessionId) return { kind: 'fresh', reason: 'no session id' };
-  if (rec.accountId !== req.accountId) return { kind: 'fresh', reason: 'other seat' };
+  // Every seat reads the same transcripts (shared store): another seat
+  // resumes the same session. Otherwise only its own seat can.
+  if (rec.accountId !== req.accountId && !req.crossSeat) return { kind: 'fresh', reason: 'other seat' };
   const msgs = req.messages;
-  if (msgs.length <= rec.history.length) return { kind: 'fresh', reason: 'history shrank or was replayed' };
-  for (let i = 0; i < rec.history.length; i++) {
-    const slot = rec.history[i];
+  let history = rec.history;
+  if (rec.interruptedTail && history.at(-1) === ASSISTANT_SLOT && msgs[history.length - 1]?.role !== 'assistant') {
+    // The stopped reply is not in Alfred's history: the session keeps it, and
+    // the next message follows it.
+    history = history.slice(0, -1);
+  }
+  if (msgs.length <= history.length) return { kind: 'fresh', reason: 'history shrank or was replayed' };
+  for (let i = 0; i < history.length; i++) {
+    const slot = history[i];
     const ok = slot === ASSISTANT_SLOT ? msgs[i].role === 'assistant' : slot === messageFingerprint(msgs[i]);
     if (!ok) return { kind: 'fresh', reason: `history diverged at message ${i}` };
   }
-  const delta = msgs.slice(rec.history.length);
+  const delta = msgs.slice(history.length);
   if (delta.some((m) => m.role === 'assistant')) return { kind: 'fresh', reason: 'assistant message not produced by the session' };
   const note = systemUpdateNote(rec.currentSystem, req.system);
   if (note === 'too-large') return { kind: 'fresh', reason: 'system prompt rewritten' };

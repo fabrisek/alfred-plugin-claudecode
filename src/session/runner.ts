@@ -16,6 +16,7 @@ import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample }
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery } from '../ClaudeCodeProvider.js';
+import type { CliProcessTracker } from '../agentSession/processTracker.js';
 import { ChangeTracker, describeCall, type RunReport, type RunStatus } from './summary.js';
 import { seatForResume, sessionCwd, type SessionIndex } from './sessions.js';
 
@@ -143,6 +144,8 @@ export type SessionRunnerOptions = {
   logger: Logger;
   onAccountUsed?: (accountId: string) => void;
   now?: () => number;
+  /** Records every CLI process, so a crashed gateway's orphans are killed on the next start. */
+  tracker?: CliProcessTracker;
 };
 
 export class SessionRunner {
@@ -380,6 +383,12 @@ export class SessionRunner {
     if (req.sessionId) options.resume = req.sessionId;
     if (cli.path) options.pathToClaudeCodeExecutable = cli.path;
     if (cli.native && req.effort) options.extraArgs = { effort: req.effort };
+    if (this.opts.tracker) {
+      // Own spawn: the SDK then forwards no stderr, so the tracker does.
+      options.spawnClaudeCodeProcess = this.opts.tracker.spawner((data) => {
+        stderrTail = (stderrTail + data).slice(-STDERR_TAIL);
+      });
+    }
 
     let tokens: TokenSample | undefined;
     let rejectedUntil: number | null = null;

@@ -262,6 +262,91 @@ describe('engine sessions: process lifetime', () => {
     p.dispose();
   });
 
+  it('closes a stopped sub-agent process at once on endSession, and its next message resumes the same session', async () => {
+    let replies = 0;
+    const cliFake = fakeCli(() => (++replies === 1 ? call(1) : 'carried on'));
+    __setQueryForTests(cliFake.fn);
+    const pool = makePool();
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const sessions = (p as unknown as { sessions: EngineSessions }).sessions;
+    const key = 'par-r-1|dev|';
+    const msgs: Message[] = [{ role: 'system', content: SYSTEM }, { role: 'user', content: 'task brief' }];
+    // Its reply called a tool; the user pressed Stop while the tool ran.
+    await p.chat({ model: 'opus', messages: msgs, session: { key, task: true } });
+    assert.equal(sessions.liveCount(), 1);
+    // A top-level thread is kept warm…
+    await p.endSession({ key, task: false }, 'stopped');
+    assert.equal(sessions.liveCount(), 1);
+    // …a sub-agent's process goes now, not after the idle timeout.
+    await p.endSession({ key, task: true }, 'stopped');
+    assert.equal(sessions.liveCount(), 0);
+    assert.equal(cliFake.spawns[0].closed, true);
+    // Nothing deleted: the record stays, and the user's next message resumes
+    // the same CLI session with only what is new.
+    const sid = sessions.record(key)?.sessionId;
+    assert.equal(sid, 'session-1');
+    msgs.push({ role: 'assistant', content: 'Listing.', toolCalls: [{ id: 'a', name: 'list_dir', arguments: {} }] });
+    msgs.push({ role: 'tool', name: 'list_dir', content: 'aborted' });
+    msgs.push({ role: 'user', content: 'go on please' });
+    const res = await p.chat({ model: 'opus', messages: msgs, session: { key, task: true } });
+    assert.equal(res.content, 'carried on');
+    assert.equal(cliFake.spawns.length, 2);
+    assert.equal(cliFake.spawns[1].options.resume, 'session-1');
+    assert.ok(!cliFake.spawns[1].inputs[0].join(' ').includes('task brief'), 'delta only: the session holds the brief');
+    assert.ok(cliFake.spawns[1].inputs[0].join(' ').includes('go on please'));
+    p.dispose();
+  });
+
+  it('keeps the session record when a request is stopped before the CLI settles', async () => {
+    const pool = makePool();
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const sessions = (p as unknown as { sessions: EngineSessions }).sessions;
+    const key = 'par-r-2|dev|';
+    // First request settles normally: the record knows the session id.
+    let hang = false;
+    const base = fakeCli(() => call(1));
+    const fn = (args: Parameters<typeof base.fn>[0]) => {
+      const q = (base.fn as unknown as (a: unknown) => { [Symbol.asyncIterator]: () => AsyncIterator<unknown>; interrupt: () => Promise<void>; close: () => void })(args);
+      const inner = q[Symbol.asyncIterator]();
+      let closed = false;
+      let wake: (() => void) | null = null;
+      return {
+        ...q,
+        // Second request: the CLI ignores the interrupt and never answers.
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            if (!hang) return inner.next();
+            await new Promise<void>((r) => {
+              wake = r;
+              if (closed) r();
+            });
+            return { done: true, value: undefined };
+          },
+        }),
+        close: () => {
+          closed = true;
+          wake?.();
+          q.close();
+        },
+      };
+    };
+    __setQueryForTests(fn as never);
+    const msgs: Message[] = [{ role: 'user', content: 'task brief' }];
+    await p.chat({ model: 'opus', messages: msgs, session: { key, task: true } });
+    assert.equal(sessions.record(key)?.sessionId, 'session-1');
+    msgs.push({ role: 'assistant', content: 'Listing.', toolCalls: [{ id: 'a', name: 'list_dir', arguments: {} }] });
+    msgs.push({ role: 'tool', name: 'list_dir', content: 'x' });
+    hang = true;
+    const ctl = new AbortController();
+    setTimeout(() => ctl.abort(), 20);
+    const started = Date.now();
+    await p.chat({ model: 'opus', messages: msgs, session: { key, task: true }, signal: ctl.signal }).catch(() => undefined);
+    assert.ok(Date.now() - started < 20_000, 'the stop fallback ended the request');
+    assert.equal(sessions.liveCount(), 0);
+    assert.equal(sessions.record(key)?.sessionId, 'session-1', 'the session survives the stop');
+    p.dispose();
+  });
+
   it('closes a sub-agent process when it reports its task done', async () => {
     const cliFake = fakeCli(() => '<tool_call>\n{"name":"task_complete","arguments":{"summary":"x"}}\n</tool_call>');
     __setQueryForTests(cliFake.fn);
@@ -300,6 +385,87 @@ describe('engine sessions: process lifetime', () => {
   });
 });
 
+describe('engine sessions: seat switch', () => {
+  /**
+   * A fake CLI whose replies carry transcript uuids, and whose seat (from the
+   * spawn env) can be made to answer with a usage-limit error.
+   */
+  function seatCli(limitedSeat: { token: string | null }) {
+    const spawns: Array<{ options: Record<string, unknown>; inputs: string[]; seatToken: string }> = [];
+    const fn = (args: { prompt: AsyncIterable<{ message: { content: Array<{ type: string; text?: string }> } }>; options: Record<string, unknown> }) => {
+      const env = (args.options.env ?? {}) as Record<string, string>;
+      const seatToken = env.CLAUDE_CODE_OAUTH_TOKEN ?? '';
+      const spawn = { options: args.options, inputs: [] as string[], seatToken };
+      spawns.push(spawn);
+      const sid = (args.options.resume as string | undefined) ?? `session-${spawns.length}`;
+      async function* run() {
+        let n = 0;
+        for await (const m of args.prompt) {
+          n++;
+          spawn.inputs.push(m.message.content.map((b) => b.text ?? '').join(' '));
+          yield { type: 'system', subtype: 'init', session_id: sid, tools: [], model: 'claude-haiku' };
+          if (limitedSeat.token === seatToken) {
+            yield { type: 'assistant', error: 'rate_limit', session_id: sid, message: { model: '<synthetic>', content: [{ type: 'text', text: "You've hit your usage limit · resets 5am" }] } };
+            yield { type: 'result', subtype: 'success', is_error: true, result: "You've hit your usage limit · resets 5am", session_id: sid };
+            continue;
+          }
+          const text = `reply ${spawns.length}.${n}`;
+          yield { type: 'stream_event', session_id: sid, event: { type: 'message_start', message: { usage: { input_tokens: 3, cache_creation_input_tokens: 4000 } } } };
+          yield { type: 'stream_event', session_id: sid, event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } };
+          yield { type: 'assistant', uuid: `uuid-${spawns.length}-${n}`, session_id: sid, message: { model: 'claude-haiku', content: [{ type: 'text', text }] } };
+          yield { type: 'result', subtype: 'success', is_error: false, session_id: sid, total_cost_usd: 0.001 };
+        }
+      }
+      const it = run();
+      return { [Symbol.asyncIterator]: () => it, interrupt: async () => {}, close: () => void it.return(undefined) };
+    };
+    return { spawns, fn: fn as never };
+  }
+
+  it('continues the same session on the next seat when the seat runs out, sending only the delta', async () => {
+    const limited = { token: null as string | null };
+    const fake = seatCli(limited);
+    __setQueryForTests(fake.fn);
+    const pool = makePool();
+    const [a, b] = pool.list();
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger, sessionsDir: mkdtempSync(join(dir, 's-')), crossSeat: () => true });
+    const sessions = (p as unknown as { sessions: EngineSessions }).sessions;
+    const key = 'conv-seat|dev|';
+    const msgs: Message[] = [{ role: 'system', content: SYSTEM }, { role: 'user', content: 'remember ORCA-5' }];
+    const first = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    assert.equal(first.content, 'reply 1.1');
+    assert.equal(sessions.record(key)?.accountId, a.id);
+    assert.equal(sessions.record(key)?.lastUuid, 'uuid-1-1');
+
+    // Seat A runs out in the middle of the next request.
+    limited.token = pool.tokenFor(a);
+    msgs.push({ role: 'assistant', content: first.content }, { role: 'user', content: 'what was the word?' });
+    const second = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    assert.equal(second.content, 'reply 2.1');
+    // A's process got the delta and failed; B resumed the SAME session at the
+    // last kept reply, and got the delta once — not the whole history.
+    assert.equal(fake.spawns.length, 2);
+    assert.deepEqual(fake.spawns[0].inputs.slice(1), ['User:\nwhat was the word?'], "A's live process: the delta, then the limit");
+    const onB = fake.spawns[1];
+    assert.equal(onB.seatToken, pool.tokenFor(b));
+    assert.equal(onB.options.resume, 'session-1');
+    assert.equal(onB.options.resumeSessionAt, 'uuid-1-1');
+    assert.deepEqual(onB.inputs, ['User:\nwhat was the word?']);
+    assert.equal(sessions.record(key)?.accountId, b.id);
+    assert.equal(sessions.record(key)?.sessionId, 'session-1');
+    p.dispose();
+  });
+
+  it('plans a resume on another seat only when the seats share their sessions', () => {
+    const user = (c: string): Message => ({ role: 'user', content: c });
+    const r = { key: 'k', sessionId: 's', accountId: 'A', launchSystem: SYSTEM, currentSystem: SYSTEM, history: [messageFingerprint(user('hi')), ASSISTANT_SLOT], updatedAt: 0 };
+    const req = { accountId: 'B', system: SYSTEM, messages: [user('hi'), { role: 'assistant', content: 'x' } as Message, user('next')] };
+    assert.equal(planSession(r, req).kind, 'fresh');
+    const plan = planSession(r, { ...req, crossSeat: true });
+    assert.deepEqual(plan.kind === 'continue' && plan.delta.map((m) => m.content), ['next']);
+  });
+});
+
 describe('engine sessions: planning', () => {
   it('keeps the volatile tail of the system prompt apart', () => {
     assert.deepEqual(splitVolatileContext(SYSTEM), { stable: STABLE, volatile: '# Dynamic Project Context\n#### Open tasks: 9 task(s)' });
@@ -316,6 +482,25 @@ describe('engine sessions: planning', () => {
     currentSystem: SYSTEM,
     history,
     updatedAt: 0,
+  });
+
+  it('continues after a stopped reply, whether or not Alfred kept it', () => {
+    const history = [messageFingerprint(user('hi')), ASSISTANT_SLOT, messageFingerprint({ role: 'tool', content: 'r' }), ASSISTANT_SLOT];
+    const stopped = { ...rec(history), interruptedTail: true };
+    const base: Message[] = [user('hi'), { role: 'assistant', content: 'call' }, { role: 'tool', content: 'r' }];
+    // Dropped by Alfred: the next user message follows the session's cut reply.
+    const dropped = planSession(stopped, { accountId: 'a', system: SYSTEM, messages: [...base, user('go on')] });
+    assert.equal(dropped.kind, 'continue');
+    assert.deepEqual(dropped.kind === 'continue' && dropped.delta.map((m) => m.content), ['go on']);
+    // Kept (what had streamed): same.
+    const kept = planSession(stopped, {
+      accountId: 'a',
+      system: SYSTEM,
+      messages: [...base, { role: 'assistant', content: 'partial' }, user('go on')],
+    });
+    assert.deepEqual(kept.kind === 'continue' && kept.delta.map((m) => m.content), ['go on']);
+    // Without the flag, a missing reply is a replay: fresh.
+    assert.equal(planSession(rec(history), { accountId: 'a', system: SYSTEM, messages: [...base, user('go on')] }).kind, 'fresh');
   });
 
   it('continues with the new user and tool messages only', () => {

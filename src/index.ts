@@ -36,6 +36,7 @@ import {
   type ChatSessionConfig,
 } from './agentSession/ClaudeSessionAdapter.js';
 import { ClaudeCodeSessionProvider } from './agentSession/ClaudeSessionProvider.js';
+import { CliProcessTracker } from './agentSession/processTracker.js';
 
 function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
   const ctx =
@@ -228,6 +229,17 @@ const plugin: AlfredPlugin = {
       pool.update('default', { auth: 'token' });
     }
     poolRef = pool;
+    // Every CLI process this plugin starts is recorded; the ones a crashed or
+    // killed gateway left behind are killed now, before anything new starts
+    // (only recorded pids whose image and start time still match — never the
+    // user's own `claude`, never session files or transcripts).
+    const tracker = new CliProcessTracker(join(ctx.dataDir, 'cli-pids.json'), ctx.logger);
+    void tracker
+      .reapOrphans()
+      .then((n) => {
+        if (n > 0) ctx.logger.info('killed orphan Claude Code processes from a previous run', { count: n });
+      })
+      .catch((err: unknown) => ctx.logger.warn('orphan reaping failed', { err: (err as Error).message }));
     const usage = new UsageRefresher(pool);
     refresher = usage;
 
@@ -255,6 +267,9 @@ const plugin: AlfredPlugin = {
       onAccountUsed: (id: string) => usage.soon(id),
       // One persistent Claude Code session per conversation (engine mode).
       sessionsDir: join(ctx.dataDir, 'engine-sessions'),
+      tracker,
+      // A seat that runs out hands the same session to the next one.
+      crossSeat: () => crossSeat,
     };
     let provider: ClaudeCodeProvider;
     if (chatCfg.cliMode) {
@@ -266,6 +281,7 @@ const plugin: AlfredPlugin = {
         config: chatCfg,
         crossSeat: () => crossSeat,
         onAccountUsed: (id) => usage.soon(id),
+        tracker,
       });
       adapterRef = adapter;
       provider = new ClaudeCodeSessionProvider(providerOpts, adapter, sessionCapabilities(chatCfg, crossSeat));
@@ -289,6 +305,7 @@ const plugin: AlfredPlugin = {
       config: resolveSessionConfig(ctx.config, cfg),
       logger: ctx.logger,
       onAccountUsed: (id) => usage.soon(id),
+      tracker,
     });
     runnerRef = runner;
     registerSessionTools(ctx, runner);
