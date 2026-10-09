@@ -42,7 +42,21 @@ export type ResetEvent = {
   seenAt: number;
 };
 
-type CapacityFile = { version: 1; since: number; last: Record<string, Reading>; events: ResetEvent[] };
+/** One utilisation reading: [epoch ms, percent]. */
+export type Sample = [number, number];
+
+type CapacityFile = {
+  version: 1;
+  since: number;
+  last: Record<string, Reading>;
+  events: ResetEvent[];
+  /** "<account>|<window>" → readings over time (quota over time), bounded below. */
+  samples?: Record<string, Sample[]>;
+};
+
+/** Readings kept per account and window, and for how long. */
+export const SAMPLES_MAX = 2500;
+export const SAMPLES_KEEP_MS = 8 * 24 * 3_600_000;
 
 export class CapacityTracker {
   private data: CapacityFile;
@@ -59,17 +73,41 @@ export class CapacityTracker {
     try {
       const raw = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<CapacityFile>;
       if (raw.version === 1) {
-        return { version: 1, since: raw.since ?? this.now(), last: raw.last ?? {}, events: Array.isArray(raw.events) ? raw.events : [] };
+        return { version: 1, since: raw.since ?? this.now(), last: raw.last ?? {}, events: Array.isArray(raw.events) ? raw.events : [], samples: raw.samples ?? {} };
       }
     } catch {
       // First run.
     }
     this.dirty = true;
-    return { version: 1, since: this.now(), last: {}, events: [] };
+    return { version: 1, since: this.now(), last: {}, events: [], samples: {} };
   }
 
   get since(): number {
     return this.data.since;
+  }
+
+/** Readings of one account's window since `from`, oldest first. */
+  samples(account: string, window: string, from = 0): Sample[] {
+    return (this.data.samples?.[`${account}|${window}`] ?? []).filter((x) => x[0] >= from);
+  }
+
+  /** Count of readings, for change detection. */
+  get sampleCount(): number {
+    return Object.values(this.data.samples ?? {}).reduce((n, l) => n + l.length, 0);
+  }
+
+  private sample(id: string, at: number, pct: number): void {
+    const all = (this.data.samples ??= {});
+    const list = (all[id] ??= []);
+    const last = list[list.length - 1];
+    if (last && last[0] >= at) return; // the same reading again
+    list.push([at, Math.round(pct * 10) / 10]);
+    const cutoff = this.now() - SAMPLES_KEEP_MS;
+    let drop = 0;
+    while (drop < list.length && list[drop][0] < cutoff) drop++;
+    if (list.length - drop > SAMPLES_MAX) drop = list.length - SAMPLES_MAX;
+    if (drop) list.splice(0, drop);
+    this.dirty = true;
   }
 
   get events(): readonly ResetEvent[] {
@@ -96,6 +134,7 @@ export class CapacityTracker {
       }
       if (!w || w.resetsAt === null || w.resetsAt <= now) continue;
       const at = usage?.fetchedAt ?? now;
+      if (typeof w.percent === 'number') this.sample(id, at, w.percent);
       const cur = this.data.last[id];
       if (!cur || cur.at !== at || cur.percent !== w.percent || cur.resetsAt !== w.resetsAt) {
         this.data.last[id] = { percent: typeof w.percent === 'number' ? w.percent : null, resetsAt: w.resetsAt, at };

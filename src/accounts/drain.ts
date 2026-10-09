@@ -48,11 +48,11 @@ export function drainScore(usage: AccountUsage | undefined, model: string, thres
   return { score: headroom / hours, headroom, resetsAt };
 }
 
-/** "resets in 40m, 62% left" */
+/** "62% left, resets in 40m" */
 export function drainReason(d: DrainScore, threshold: number, now = Date.now()): string {
   const left = `${Math.round(d.headroom + (100 - threshold))}% left`;
-  if (d.resetsAt === null) return `no reset known, ${left}`;
+  if (d.resetsAt === null) return `${left}, no reset known`;
   const m = Math.max(0, Math.round((d.resetsAt - now) / 60_000));
   const when = m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
-  return `resets in ${when}, ${left}`;
+  return `${left}, resets in ${when}`;
 }

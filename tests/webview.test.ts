@@ -395,7 +395,8 @@ describe('Claude panel page', () => {
     assert.match(body, /high/);
     assert.match(body, /1m 5s/, 'running duration ticks from startedAt');
     assert.match(body, /same login as A/, 'two seats on one Claude login are flagged');
-    assert.match(body, /back in 30m/);
+    assert.match(body, /exhausted · back \S+ \(in 30m\)/, 'one status: exhausted, and when it is back');
+    assert.doesNotMatch(body, /ok/, 'no "ok" next to a full window');
     assert.ok(btn(page, 'login', 'c'), 'a logged-out seat offers Log in');
     assert.equal(btn(page, 'login', 'a'), null, 'a working seat does not');
     assert.equal(page.$('conn')!.hidden, true);
@@ -452,11 +453,11 @@ describe('Claude panel page', () => {
     assert.equal(page.$('tokv-b'), input);
     assert.equal(input.value, 'half-typed');
     assert.ok(page.doc.stats.innerHTMLWrites - writes <= 1, 'identical polls write (almost) nothing');
-    b.snap.accounts[0].tokens.window5h.output = 99_000;
+    b.snap.accounts[0].usage!.windows[0].percent = 70;
     await page.advance(3_000);
     assert.notEqual(page.doc.querySelector('[data-key=acc:a]'), rowA, 'a changed row is rebuilt');
     assert.equal(page.$('tokv-b'), input, 'its neighbours are not');
-    assert.match(page.doc.querySelector('[data-key=acc:a]')!.textContent, /99\.0k out/);
+    assert.match(page.doc.querySelector('[data-key=acc:a]')!.textContent, /30%/);
   });
 
   it('wires every seat button to its action', async () => {
@@ -599,13 +600,12 @@ describe('Claude panel page', () => {
   it('says which seat a new conversation gets next, and why', async () => {
     const { b, invoke } = bridge();
     const page = await runPage(renderDashboard(), invoke, { startAt: T0 });
-    assert.match(page.$('seatFacts')!.textContent, /Next: none usable/);
-    assert.match(page.$('seatFacts')!.textContent, /Strategy: fill in order · switch at 90%/);
-    (b.snap as Record<string, unknown>).next = { id: 'a', label: 'A', why: 'resets in 40m, 62% left' };
+    assert.match(page.$('seatFacts')!.textContent, /Next: none ready/);
+    assert.match(page.$('seatFacts')!.textContent, /switch at 90%/);
+    (b.snap as Record<string, unknown>).next = { id: 'a', label: 'A', why: '62% left, resets in 40m' };
     b.snap.settings.strategy = 'drain';
     await page.advance(10_000);
-    assert.match(page.$('seatFacts')!.textContent, /Next: A · resets in 40m, 62% left/);
-    assert.match(page.$('seatFacts')!.textContent, /Strategy: use it or lose it/);
+    assert.match(page.$('seatFacts')!.textContent, /Next: A — 62% left, resets in 40m \(use it or lose it\)/);
     assert.equal(page.$('strategy')!.value, 'drain');
     assert.deepEqual(page.errors, []);
   });
@@ -801,6 +801,117 @@ describe('Claude panel usage zone', () => {
     await page.click(btn(page, 'uview', 'hourly'));
     const labels = page.doc.querySelectorAll('#useChart text.ax').map((t) => t.textContent).filter((t) => /h$/.test(t));
     assert.match(labels[0], /\d+ \S+ \d\dh|\S+ \d+ \d\dh/, 'the first hour label carries its day');
+    assert.deepEqual(page.errors, []);
+  });
+});
+
+// ---- Seats: states, sums, quota over time --------------------------------------
+
+describe('Claude panel seats', () => {
+  const H = 3_600_000;
+  const win = (pct: number, resetH: number, key = 'five_hour') => ({ key, label: key, percent: pct, resetsAt: T0 + resetH * H });
+  async function seatsPage() {
+    const snap = snapshot([]);
+    snap.accounts = [
+      account('a', { status: 'ok', usage: { windows: [win(100, 0.5), win(30, 50, 'seven_day')], fetchedAt: T0, source: 'api' } }),
+      account('b', { status: 'ok', email: 'b@example.com', usage: { windows: [win(61, 21 / 60)], fetchedAt: T0, source: 'api' } }),
+      account('c', { status: 'ok', email: 'c@example.com', usage: { windows: [win(75, 11 / 60)], fetchedAt: T0, source: 'api' } }),
+      account('d', { status: 'ok', email: 'd@example.com', usage: { windows: [win(1, 4.85)], fetchedAt: T0, source: 'api' } }),
+    ] as never;
+    const d0 = new Date(T0);
+    const today = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`;
+    const cell = (usd: number) => [0, 0, 0, 0, usd, 0, 0, 0, 1, 0, 0, 0, 0];
+    const view = {
+      ok: true, version: 'v1', scan: { running: false, backfilled: true, filesDone: 0, filesTotal: 0, lastScanAt: T0 },
+      firstAt: T0 - H, lastAt: T0, accounts: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'gone', label: 'gone (removed seat)' }],
+      days: [today], daily: { a: [cell(2)], b: [cell(3)], gone: [cell(0.5)] },
+      hours: [T0 - H], hourly: {}, models: [], plans: { a: { label: 'Team premium', monthlyUsd: 125 } }, monthStart: today.slice(0, 8) + '01', pricesVerified: 'x',
+      seatSpend: { a: { fiveFrom: T0 - 4.5 * H, fiveTok: 10, fiveUsd: 1.5, weekFrom: null, weekTok: 0, weekUsd: 0 }, b: { fiveFrom: T0 - 4 * H, fiveTok: 5, fiveUsd: 2.25, weekFrom: null, weekTok: 0, weekUsd: 0 } },
+      quota: {
+        series: {
+          a: { five: [[T0 - 6 * H, 40], [T0 - 5 * H, 80], [T0 - 4.5 * H, 2], [T0 - H, 100]], week: [], fiveReset: T0 + 0.5 * H, weekReset: null },
+          b: { five: [[T0 - 3 * H, 60], [T0 - H, 61]], week: [], fiveReset: T0 + 0.35 * H, weekReset: null },
+          c: { five: [[T0 - 2 * H, 74], [T0 - H, 75]], week: [], fiveReset: T0 + 0.2 * H, weekReset: null },
+          d: { five: [[T0 - H, 1]], week: [], fiveReset: T0 + 4.85 * H, weekReset: null },
+        },
+      },
+      capacity: { since: T0, rows: [] },
+    };
+    return runPage(renderDashboard(), async (action) => (action === 'usageHistory' ? structuredClone(view) : structuredClone(snap)), { startAt: T0 });
+  }
+
+  it('one state per seat, consistent with its numbers, and the quota left with its reset', async () => {
+    const page = await seatsPage();
+    const row = (id: string) => page.doc.querySelector(`tr[data-key=acc:${id}]`)!.textContent.replace(/\s+/g, ' ');
+    assert.match(row('a'), /exhausted · back \S+ \(in 30m\)/, 'a 5h window at 100% is exhausted, whatever the pool says');
+    assert.match(row('b'), /ready/);
+    assert.match(row('b'), /39%\S+ \(in 21m\)/, '"39% left", the reset time and how long until it');
+    assert.match(row('c'), /use before/, 'a lot left and lost soon is flagged');
+    assert.doesNotMatch(row('d'), /use before/);
+    assert.match(row('a'), /PRM/, 'the plan as a short pill');
+    assert.doesNotMatch(row('b'), /@example\.com/, 'no email column: it is in the name tooltip');
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('the header is exactly the sum of the rows, unattributed history included', async () => {
+    const page = await seatsPage();
+    const stats = page.$('stats')!.textContent.replace(/\s+/g, ' ');
+    assert.match(stats, /5h windows \$3\.8/, '1.5 + 2.25');
+    assert.match(stats, /today \$5\.5/, '2 + 3 + 0.5 unattributed');
+    assert.match(page.doc.querySelector('tr[data-key=acc:~unattributed]')!.textContent, /\$0\.50 today/);
+    assert.match(page.doc.querySelector('tr[data-key=acc:a]')!.textContent, /\$1\.5\s*\$2\.0 today/);
+  });
+
+  it('draws the quota over time: one line per seat, the drop at a reset, labels apart, dashed until the reset', async () => {
+    const page = await seatsPage();
+    assert.ok(page.doc.querySelector('#quotaChart svg'), 'chart drawn');
+    const solid = page.doc.querySelectorAll('#quotaChart polyline.ln').filter((l) => !/proj/.test(l.getAttribute('class')!));
+    assert.equal(solid.length, 4);
+    // Seat a went 80% -> 2% at a reset: two points at the same x, the second far lower.
+    const pts = solid[0].getAttribute('points')!.split(' ').map((p) => p.split(',').map(Number));
+    assert.ok(pts.some((p, i) => i > 0 && p[0] === pts[i - 1][0] && p[1] - pts[i - 1][1] > 50), 'a sharp drop at the reset');
+    assert.equal(page.doc.querySelectorAll('#quotaChart polyline.proj').length, 4, 'every seat projected to its reset');
+    assert.ok(page.doc.querySelector('#quotaChart line.now'), 'a now marker');
+    const ys = page.doc.querySelectorAll('#quotaChart text.endl').map((t) => Number(t.getAttribute('y'))).sort((x, y) => x - y);
+    assert.equal(ys.length, 4);
+    for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11.9, `labels apart: ${ys}`);
+    const tip = page.doc.querySelectorAll('#quotaChart g.col title').map((t) => t.textContent)[30];
+    assert.match(tip, /A: .*\nB: .*\nC: .*\nD: /, 'the tooltip has every seat at that instant');
+    await page.click(btn(page, 'qwin', 'week'));
+    assert.match(page.$('quotaChart')!.textContent, /No quota reading yet/);
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('sorts by the soonest reset when asked', async () => {
+    const page = await seatsPage();
+    const order = () => page.doc.querySelectorAll('#acc tr').map((t) => t.getAttribute('data-key'));
+    assert.deepEqual(order().slice(0, 4), ['acc:a', 'acc:b', 'acc:c', 'acc:d'], 'manual order by default');
+    await page.type(page.$('seatSort'), 'reset');
+    assert.deepEqual(page.calls.filter((c) => c.action === 'updateSettings').pop(), { action: 'updateSettings', args: { seatSort: 'reset' } });
+  });
+});
+
+describe('Claude panel usage as lines', () => {
+  it('draws one cumulative line per seat, named at its end', async () => {
+    const { UsageStore } = await import('../src/usage/history.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const store = new UsageStore(join(mkdtempSync(join(tmpdir(), 'alfred-lines-')), 'u.json'), () => T0);
+    store.add(T0 - 5 * 3_600_000, 'a', 'claude-opus-5-5', '', [1, 0, 0, 100_000, 0, 1000]);
+    store.add(T0 - 2 * 3_600_000, 'a', 'claude-opus-5-5', '', [1, 0, 0, 100_000, 0, 1000]);
+    store.add(T0 - 3 * 3_600_000, 'b', 'claude-opus-5-5', '', [1, 0, 0, 190_000, 0, 1000]);
+    const scan = { running: false, backfilled: true, filesDone: 0, filesTotal: 0, lastScanAt: T0 };
+    const view = { ok: true, ...store.view({ scan, seats: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], hourSpan: 72 }), version: 'v', capacity: { since: T0, rows: [] } };
+    const page = await runPage(renderDashboard(), async (action) => (action === 'usageHistory' ? structuredClone(view) : structuredClone(snapshot([]))), { startAt: T0 });
+    await page.click(btn(page, 'uchart', 'lines'));
+    const labels = page.doc.querySelectorAll('#useChart text.endl');
+    assert.deepEqual(labels.map((l) => l.getAttribute('data-sid')).sort(), ['a', 'b']);
+    const ys = labels.map((l) => Number(l.getAttribute('y')));
+    assert.ok(Math.abs(ys[0] - ys[1]) >= 11.9, 'close values: labels pushed apart');
+    assert.equal(page.$('useLegend')!.hidden, true, 'no separate legend');
+    const pts = page.doc.querySelector('#useChart polyline.ln')!.getAttribute('points')!.split(' ').map((p) => Number(p.split(',')[1]));
+    assert.ok(pts[pts.length - 1] < pts[0], 'the line rises with the usage');
     assert.deepEqual(page.errors, []);
   });
 });

@@ -45,7 +45,7 @@ describe('drain score', () => {
     assert.equal(drainScore(usage(0, 4, 85, 100), 'opus', 90, NOW).headroom, 5);
     // A window about to roll over does not win on a division by ~0.
     assert.equal(drainScore(usage(10, 0.01), 'opus', 90, NOW).score, 80 / 0.25);
-    assert.equal(drainReason(drainScore(usage(38, 40 / 60), 'opus', 90, NOW), 90, NOW), 'resets in 40m, 62% left');
+    assert.equal(drainReason(drainScore(usage(38, 40 / 60), 'opus', 90, NOW), 90, NOW), '62% left, resets in 40m');
   });
 });
 
@@ -60,7 +60,7 @@ describe('drain strategy', () => {
     assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
     const next = pool.nextPick('opus')!;
     assert.equal(next.id, b.id);
-    assert.equal(next.why, 'resets in 30m, 70% left');
+    assert.equal(next.why, '70% left, resets in 30m');
   });
 
   it('breaks ties with the manual seat order', () => {
@@ -95,12 +95,41 @@ describe('drain strategy', () => {
     assert.equal(pool.pick({ model: 'opus', prefer: a.id }).account?.id, b.id, 'over the threshold: it moves');
   });
 
+  it('picks the seat about to lose the most, on the panel data of 2026-10-09 04:00', () => {
+    // claude-standard: 1% used, resets in 4h51; fabrisek: 75% used, resets in 11 min;
+    // claude-premium1: 61% used, resets in 21 min; claude-premium: 100%.
+    const pool = makePool(4);
+    pool.updateSettings({ threshold: 100 });
+    const [std, fab, prm1, prm] = pool.list();
+    pool.setUsage(std.id, usage(1, 4 + 51 / 60));
+    pool.setUsage(fab.id, usage(75, 11 / 60));
+    pool.setUsage(prm1.id, usage(61, 21 / 60));
+    pool.setUsage(prm.id, usage(100, 2));
+    const next = pool.nextPick('opus')!;
+    assert.equal(next.id, prm1.id, '39% left lost in 21 min beats 25% in 11 min and 99% in almost 5 h');
+    assert.equal(next.why, '39% left, resets in 21m');
+    pool.updateSettings({ strategy: 'fill' });
+    assert.equal(pool.nextPick('opus')!.id, std.id, 'fill: the first seat in order');
+  });
+
+  it('moves a saved fill back to drain once more (rev 2), then keeps a fill chosen later', () => {
+    const dataDir = mkdtempSync(join(root, 'r-'));
+    makePool(1, dataDir).updateSettings({ strategy: 'fill' });
+    const path = join(dataDir, 'accounts.json');
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    delete raw.settings.strategyRev; // saved by the first migration only
+    raw.settings.drainDefaulted = true;
+    writeFileSync(path, JSON.stringify(raw));
+    assert.equal(new AccountPool({ dataDir, logger, now: () => NOW }).settings.strategy, 'drain');
+  });
+
   it('moves a saved fill (the old default) to drain once, then keeps a fill chosen later', () => {
     const dataDir = mkdtempSync(join(root, 'm-'));
     makePool(1, dataDir).updateSettings({ strategy: 'fill' });
     const path = join(dataDir, 'accounts.json');
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     delete raw.settings.drainDefaulted;
+    delete raw.settings.strategyRev;
     writeFileSync(path, JSON.stringify(raw));
     const p2 = new AccountPool({ dataDir, logger, now: () => NOW });
     assert.equal(p2.settings.strategy, 'drain');

@@ -61,6 +61,10 @@ export type PoolSettings = {
   strategy: Strategy;
   /** Set once the saved strategy went through the `drain` default (see withDrainDefault). */
   drainDefaulted?: boolean;
+  /** Revision of that migration: 2 = drain made the default again over a saved fill (2026-10-09). */
+  strategyRev?: number;
+  /** Seat order in the panel: the manual order, or the soonest 5h reset first. */
+  seatSort?: 'manual' | 'reset';
   /** Percent (0-100) of any relevant window at which `fill` moves on. */
   threshold: number;
   /** Background usage poll interval, minutes. */
@@ -267,6 +271,7 @@ export class AccountPool {
   updateSettings(patch: Partial<PoolSettings>): PoolSettings {
     const s = this.state.settings;
     if (patch.strategy === 'fill' || patch.strategy === 'spread' || patch.strategy === 'drain') s.strategy = patch.strategy;
+    if (patch.seatSort === 'manual' || patch.seatSort === 'reset') s.seatSort = patch.seatSort;
     if (typeof patch.threshold === 'number' && Number.isFinite(patch.threshold)) {
       s.threshold = Math.min(100, Math.max(1, Math.round(patch.threshold)));
     }
@@ -738,6 +743,7 @@ function slug(s: string): string {
  * `drain` once, and is marked so that a later `fill` chosen in the panel stays.
  */
 function withDrainDefault(s: PoolSettings): PoolSettings {
-  if (s.drainDefaulted) return s;
-  return { ...s, strategy: s.strategy === 'fill' ? 'drain' : s.strategy, drainDefaulted: true };
+  // Rev 2: a "fill" saved before it (the old panel offered fill first) moves to drain once more.
+  if ((s.strategyRev ?? 0) >= 2) return s;
+  return { ...s, strategy: s.strategy === 'fill' ? 'drain' : s.strategy, drainDefaulted: true, strategyRev: 2 };
 }

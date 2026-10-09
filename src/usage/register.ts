@@ -109,7 +109,9 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
     try {
       const a = (args ?? {}) as { since?: unknown; hours?: unknown };
       // The hour is part of the version: the hourly window moves even when nothing new came in.
-      const version = `${store.version}@${Math.floor(Date.now() / 3_600_000)}#${capacity.events.length}`;
+      // Also the seats' current windows (their spend is drawn from them) and the quota readings.
+      const resets = pool.list().map((x) => windowStart(pool.runtime(x.id).usage, 'five_hour') ?? 0).join(',');
+      const version = `${store.version}@${Math.floor(Date.now() / 3_600_000)}#${capacity.events.length}#${capacity.sampleCount}#${resets}`;
       if (a.since === version) return { ok: true, unchanged: true, version, scan: scanner.status };
       const hours = Number(a.hours);
       const view = store.view({
@@ -118,11 +120,49 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
         plans: seatPlans(),
         hourSpan: Number.isFinite(hours) && hours >= 24 && hours <= 24 * 30 ? Math.round(hours) : 48,
       });
-      return { ok: true, ...view, version, capacity: capacityView(capacity, store) };
+      return { ok: true, ...view, version, capacity: capacityView(capacity, store), seatSpend: seatSpend(), quota: quotaView() };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
   });
+
+  /**
+   * What each seat spent in its real quota windows (from the window start the
+   * usage source reports — reset minus 5h / 7d — to now), from the same
+   * history as the rest of the tab. Hour-granular: the hour the window
+   * started in counts whole. Seats without a known window get none.
+   */
+  function seatSpend(): Record<string, { fiveFrom: number | null; fiveTok: number; fiveUsd: number; weekFrom: number | null; weekTok: number; weekUsd: number }> {
+    const now = Date.now();
+    const out: ReturnType<typeof seatSpend> = {};
+    const round = (x: number): number => Math.round(x * 1e4) / 1e4;
+    for (const a of pool.list()) {
+      const u = pool.runtime(a.id).usage;
+      const fiveFrom = windowStart(u, 'five_hour');
+      const weekFrom = windowStart(u, 'seven_day');
+      const five = fiveFrom !== null ? store.spend(a.id, fiveFrom, now) : { tokens: 0, usd: 0 };
+      const week = weekFrom !== null ? store.spend(a.id, weekFrom, now) : { tokens: 0, usd: 0 };
+      out[a.id] = { fiveFrom, fiveTok: five.tokens, fiveUsd: round(five.usd), weekFrom, weekTok: week.tokens, weekUsd: round(week.usd) };
+    }
+    return out;
+  }
+
+  /** Quota readings of the last 48h (5h windows) and 8 days (week), with each seat's next resets. */
+  function quotaView(): { series: Record<string, { five: Array<[number, number]>; week: Array<[number, number]>; fiveReset: number | null; weekReset: number | null }> } {
+    const now = Date.now();
+    const series: ReturnType<typeof quotaView>['series'] = {};
+    for (const a of pool.list()) {
+      const u = pool.runtime(a.id).usage;
+      const reset = (key: string): number | null => u?.windows.find((w) => w.key === key && !w.model && w.resetsAt !== null && w.resetsAt > now)?.resetsAt ?? null;
+      series[a.id] = {
+        five: capacity.samples(a.id, 'five_hour', now - 48 * 3_600_000),
+        week: capacity.samples(a.id, 'seven_day', now - 8 * 24 * 3_600_000),
+        fiveReset: reset('five_hour'),
+        weekReset: reset('seven_day'),
+      };
+    }
+    return { series };
+  }
 
   return {
     stop: () => {
@@ -207,4 +247,11 @@ function capacityView(capacity: CapacityTracker, store: { spend(a: string, f: nu
     since: capacity.since,
     rows: [...out.values()].map((g) => ({ ...g, usedUsd: round(g.usedUsd), fullUsd: round(g.fullUsd), estUsedUsd: round(g.estUsedUsd) })),
   };
+}
+
+/** Start of a seat's current window: its next reset minus the window length. */
+function windowStart(usage: { windows: Array<{ key: string; model?: string; resetsAt: number | null }> } | undefined, key: 'five_hour' | 'seven_day'): number | null {
+  const len = key === 'five_hour' ? 5 * 3_600_000 : 7 * 24 * 3_600_000;
+  const w = usage?.windows.find((x) => x.key === key && !x.model && x.resetsAt !== null && x.resetsAt > Date.now());
+  return w && w.resetsAt !== null ? w.resetsAt - len : null;
 }

@@ -71,3 +71,24 @@ describe('CapacityTracker', () => {
     assert.equal(rows[3].fullTokens, null, 'no estimate for a seat never measured');
   });
 });
+
+describe('quota readings over time', () => {
+  it('records each new reading, and stays bounded in count and age', async () => {
+    const { SAMPLES_MAX, SAMPLES_KEEP_MS } = await import('../src/usage/capacity.js');
+    let now = T0;
+    const t = new CapacityTracker(join(tmp, `s${++n}.json`), () => now);
+    t.observe('a', reading(now, 10, now + H));
+    t.observe('a', reading(now, 10, now + H));
+    assert.equal(t.samples('a', 'five_hour').length, 1, 'the same reading twice is one sample');
+    for (let i = 1; i <= SAMPLES_MAX + 50; i++) {
+      now = T0 + i * 60_000;
+      t.observe('a', reading(now, i % 100, now + H));
+    }
+    assert.equal(t.samples('a', 'five_hour').length, SAMPLES_MAX, 'capped');
+    now += SAMPLES_KEEP_MS + H;
+    t.observe('a', reading(now, 5, now + H));
+    assert.equal(t.samples('a', 'five_hour').length, 1, 'older than the retention: dropped');
+    t.save();
+    assert.equal(new CapacityTracker(t['path' as never] as unknown as string, () => now).samples('a', 'five_hour').length, 1, 'persisted');
+  });
+});

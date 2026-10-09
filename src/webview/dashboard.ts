@@ -91,7 +91,7 @@ button.runs.on .dot { background: var(--accent); }
 table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
 th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
 th { position: sticky; top: 0; z-index: 1; background: var(--panel); color: var(--muted); font-weight: 500; font-size: 11px; height: 24px; }
-td { height: 28px; }
+td { height: 26px; }
 th.r, td.r { text-align: right; }
 tbody tr:hover td { background: var(--panel-2); }
 tbody tr:last-child td { border-bottom: none; }
@@ -157,14 +157,16 @@ button.mv:hover { color: var(--text); }
 /* usage */
 .uviz { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
   --s7: #4a3aa7; --s8: #e34948; --sunk: #a3a8b1; }
+.uviz { --s9: #8c6d2c; --s10: #0e8a96; }
 @media (prefers-color-scheme: dark) {
   .uviz { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
-    --s7: #9085e9; --s8: #e66767; --sunk: #5d6573; }
+    --s7: #9085e9; --s8: #e66767; --sunk: #5d6573; --s9: #b8954a; --s10: #22a9b5; }
 }
 :root[data-theme="light"] .uviz { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
   --s7: #4a3aa7; --s8: #e34948; --sunk: #a3a8b1; }
+.uviz { --s9: #8c6d2c; --s10: #0e8a96; }
 :root[data-theme="dark"] .uviz { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
-  --s7: #9085e9; --s8: #e66767; --sunk: #5d6573; }
+  --s7: #9085e9; --s8: #e66767; --sunk: #5d6573; --s9: #b8954a; --s10: #22a9b5; }
 .t0, .a0 { fill: var(--s1); background: var(--s1); }
 .t1, .a1 { fill: var(--s2); background: var(--s2); }
 .t2, .a2 { fill: var(--s3); background: var(--s3); }
@@ -173,6 +175,8 @@ button.mv:hover { color: var(--text); }
 .a5 { fill: var(--s6); background: var(--s6); }
 .a6 { fill: var(--s7); background: var(--s7); }
 .a7 { fill: var(--s8); background: var(--s8); }
+.a8 { fill: var(--s9); background: var(--s9); }
+.a9 { fill: var(--s10); background: var(--s10); }
 .aoth { fill: var(--muted); background: var(--muted); }
 .aunk { fill: var(--sunk); background: var(--sunk); }
 svg.chart { display: block; }
@@ -190,6 +194,16 @@ svg.chart { display: block; }
 .ub { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding: 8px 12px; gap: 6px; }
 /* Bounded: the strip, the chart and its legend fit the panel without a scroll. */
 .uchart { flex: 1; min-height: 160px; min-width: 0; overflow: hidden; }
+.chart .now { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; }
+.chart .ln { fill: none; stroke-width: 1.5; stroke-linejoin: round; }
+.chart .ln.proj { stroke-dasharray: 3 3; opacity: .7; }
+.chart .lead { stroke-width: 1; opacity: .5; }
+.chart .endl { font-size: 11px; }
+.money { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+.stale { color: var(--warn); font-size: 11px; cursor: help; }
+.tag.use { color: var(--warn); border-color: currentColor; }
+td.c-week:empty::after { content: ''; }
+.qbox { flex: 1; min-height: 140px; min-width: 0; overflow: hidden; padding: 4px 8px; }
 .capnote { color: var(--muted); font-size: 12px; padding: 24px 0; text-align: center; }
 .cu { fill: var(--s1); background: var(--s1); }
 .cl { fill: var(--sunk); background: var(--sunk); }
@@ -211,6 +225,7 @@ button.mult.sel { border-color: var(--accent-strong); box-shadow: inset 0 0 0 1p
 /* narrower panel: secondary columns and labels go, nothing scrolls sideways */
 @media (max-width: 1300px) { .c-wide { display: none; } }
 @media (max-width: 1000px) { .c-opt { display: none; } .bar { width: 40px; } }
+@media (max-width: 600px) { .c-week { display: none; } }
 @media (max-width: 720px) {
   .c-narrow { display: none; }
   .ell { max-width: 160px; }
@@ -537,22 +552,47 @@ function activityRows(list) {
 
 // ---- seats ----------------------------------------------------------------
 
-var STATUS_PILL = { active: 'info', ok: 'ok', exhausted: 'warn', 'logged out': 'err', 'auth failed': 'err', disabled: 'idle' };
-
-function meter(w, threshold, mode, label, hideReset) {
-  if (!w) return '';
-  var p = w.percent == null ? null : Math.max(0, Math.min(100, w.percent));
-  var cls = p == null ? '' : p >= 100 ? 'err' : p >= threshold ? 'warn' : '';
-  var when = w.resetsAt && !hideReset ? (mode === 'date'
-    ? '<span title="Resets ' + esc(fmtWhen(w.resetsAt)) + '">' + esc(fmtWhen(w.resetsAt)) + '</span>'
-    : '<span title="Resets ' + esc(fmtClock(w.resetsAt)) + '">' + live('left', w.resetsAt) + '</span>') : '';
-  return '<span class="meter">' + (label ? '<span class="w">' + esc(label) + '</span>' : '')
-    + '<span class="bar ' + cls + '"><i style="width:' + (p || 0) + '%"></i></span>'
-    + '<span class="p">' + (p == null ? '?' : Math.round(p) + '%') + '</span>'
-    + '<span class="when">' + when + '</span></span>';
-}
+var STATE_PILL = { ready: 'ok', 'in use': 'info', exhausted: 'warn', disabled: 'idle', 'logged out': 'err', 'auth failed': 'err' };
+var PLAN_SHORT = { 'Team standard': 'STD', 'Team premium': 'PRM', 'Max 20x': 'MAX', 'Max 5x': 'MAX5', Pro: 'PRO' };
 
 function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+function inMin(at) { return fmtLeft(at); }
+function windowOf(a, key) {
+  var u = a.usage || { windows: [] };
+  return u.windows.filter(function (w) { return w.key === key && !w.model; })[0] || null;
+}
+function leftOf(w) { return w && w.percent != null ? Math.max(0, 100 - Math.min(100, w.percent)) : null; }
+
+// One state per seat, consistent with its numbers: a window at 100% is exhausted
+// whatever the pool has not noticed yet.
+function seatState(a) {
+  var now = Date.now();
+  var five = windowOf(a, 'five_hour');
+  var week = windowOf(a, 'seven_day');
+  if (!a.enabled) return { state: 'disabled' };
+  if (a.status === 'logged out' || a.status === 'auth failed') return { state: a.status };
+  var full = [five, week].filter(function (w) { return w && w.percent != null && w.percent >= 100 && w.resetsAt && w.resetsAt > now; });
+  var back = a.exhaustedUntil && a.exhaustedUntil > now ? a.exhaustedUntil : 0;
+  full.forEach(function (w) { if (w.resetsAt > back) back = w.resetsAt; });
+  if (back) return { state: 'exhausted', back: back };
+  if (a.inFlight > 0 || a.status === 'active') return { state: 'in use' };
+  return { state: 'ready' };
+}
+
+// "39% left, 03:58 (in 21m)" with a bar that empties.
+function leftMeter(w, threshold, dated) {
+  if (!w) return '';
+  var left = leftOf(w);
+  var spare = 100 - threshold;
+  var cls = left == null ? '' : left <= spare ? 'err' : left <= spare + 15 ? 'warn' : '';
+  var when = w.resetsAt
+    ? (dated ? esc(fmtWhen(w.resetsAt)) : esc(fmtClock(w.resetsAt))) + '<span class="c-wide"> (in ' + live('left', w.resetsAt) + ')</span>'
+    : '';
+  return '<span class="meter" title="' + esc((left == null ? '?' : left + '% left') + (w.resetsAt ? ', resets ' + fmtWhen(w.resetsAt) : '')) + '">'
+    + '<span class="bar ' + cls + '"><i style="width:' + (left || 0) + '%"></i></span>'
+    + '<span class="p">' + (left == null ? '?' : Math.round(left) + '%') + '</span>'
+    + '<span class="when">' + when + '</span></span>';
+}
 
 // This month's API-equivalent value of one seat.
 function monthOf(id) {
@@ -567,67 +607,67 @@ function todayOf(id) {
   var i = usage.days.length - 1;
   return usage.days[i] === dayKey(new Date()) ? usage.daily[id][i] : null;
 }
+var TZ = (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'; } catch (e) { return 'local time'; } })();
+
+// Seats in the order the panel shows them: the manual order, or the soonest 5h reset first.
+function seatOrder(s) {
+  var list = s.accounts.slice();
+  if (s.settings.seatSort !== 'reset') return list;
+  var key = function (a) { var w = windowOf(a, 'five_hour'); return w && w.resetsAt && w.resetsAt > Date.now() ? w.resetsAt : Infinity; };
+  return list.sort(function (x, y) { return key(x) - key(y); });
+}
 
 function seatRows(s) {
+  var rows = [];
   var byEmail = {};
   s.accounts.forEach(function (a) { if (a.email) (byEmail[a.email] = byEmail[a.email] || []).push(a.label); });
-  var rows = [];
+  var manual = s.settings.seatSort !== 'reset';
+  var list = seatOrder(s);
   var last = s.accounts.length - 1;
-  var orderTitle = s.settings.strategy === 'fill'
-    ? 'Order of use: the first usable seat serves, the next one takes over when it is exhausted or disabled'
-    : 'Seat order: breaks ties between seats';
-  s.accounts.forEach(function (a, i) {
+  var now = Date.now();
+  list.forEach(function (a) {
+    var i = s.accounts.indexOf(a);
     var u = a.usage || { windows: [] };
-    var five = u.windows.filter(function (w) { return w.key === 'five_hour'; })[0];
-    var week = u.windows.filter(function (w) { return w.key === 'seven_day'; })[0];
+    var five = windowOf(a, 'five_hour');
+    var week = windowOf(a, 'seven_day');
     var scoped = u.windows.filter(function (w) { return w.model; });
-    var scopedTitle = scoped.map(function (w) {
-      return 'Weekly limit on ' + cap(w.model) + ' models: ' + (w.percent == null ? '?' : Math.round(w.percent) + '%') + (w.resetsAt ? ', resets ' + fmtWhen(w.resetsAt) : '');
-    }).join('\\n');
-    var twins = (byEmail[a.email] || []).filter(function (l) { return l !== a.label; });
     var plan = usage && usage.plans ? usage.plans[a.id] : null;
+    var st = seatState(a);
     var isNext = s.next && s.next.id === a.id;
-    var tags = (isNext ? ' <span class="tag next" title="' + esc('Next new conversation goes here: ' + s.next.why) + '">next</span>' : '')
-      + (plan ? ' <span class="tag" title="' + esc(a.subscriptionType || '') + '">' + esc(plan.label) + '</span>'
-        : a.subscriptionType ? ' <span class="tag">' + esc(a.subscriptionType) + '</span>' : '')
-      + (a.auth === 'token' ? ' <span class="tag">token</span>' : '')
-      + (a.exposeModels ? ' <span class="tag" title="model@seat variants are listed in the model picker">pinned</span>' : '')
-      + (twins.length ? ' <span class="tag warn" title="Same Claude login as ' + esc(twins.join(', ')) + '">same login as ' + esc(twins.join(', ')) + '</span>' : '');
-    var t = a.tokens;
     var bz = function (act) { return busy[act + ':' + a.id] ? ' disabled' : ''; };
-    var needsLogin = a.status === 'logged out' || a.status === 'auth failed';
+    var needsLogin = st.state === 'logged out' || st.state === 'auth failed';
+    // A lot left and lost soon: say so.
+    var fl = leftOf(five);
+    var urgent = st.state !== 'exhausted' && five && five.resetsAt && fl != null && fl >= 20 && five.resetsAt - now < 90 * 60000;
+    var nameTitle = [a.label, a.email || a.id, a.orgName || '', plan ? plan.label + ' ($' + plan.monthlyUsd + '/month)' : (a.subscriptionType || '')]
+      .concat(scoped.map(function (w) { return 'Weekly ' + cap(w.model) + ' limit: ' + (leftOf(w) == null ? '?' : leftOf(w) + '% left') + (w.resetsAt ? ', resets ' + fmtWhen(w.resetsAt) : ''); }))
+      .filter(Boolean).join('\\n');
+    var stale = u.stale
+      ? ' <span class="stale" title="' + esc('Usage not refreshed for ' + fmtDur(now - (u.fetchedAt || now)) + ' (' + u.stale + '): the bars may be behind') + '">\\u25f7</span>'
+      : '';
+    var status = '<span class="pill ' + (STATE_PILL[st.state] || 'idle') + '" title="' + esc(a.statusDetail || '') + '">' + esc(st.state)
+      + (st.back ? ' \\u00b7 back ' + esc(fmtClock(st.back)) + '<span class="c-wide"> (in ' + live('left', st.back) + ')</span>' : '') + '</span>'
+      + (a.inFlight ? ' <span class="tag info" title="Requests running">' + a.inFlight + '</span>' : '') + stale;
+    var sp = usage && usage.seatSpend ? usage.seatSpend[a.id] : null;
     var today = todayOf(a.id);
-    var todayCell = today
-      ? '<span class="num" title="' + esc(['Today, API-equivalent'].concat(breakdownLines([today[0], today[1], today[2], today[3]], [today[4], today[5], today[6], today[7]])).join('\\n')) + '">' + fmtUsd(usdOf(today)) + '</span>'
-      : '<span class="muted">\\u2014</span>';
-    // Status says when an exhausted seat is back; the 5h bar does not repeat it.
-    var back = a.exhaustedUntil;
-    var sameReset = back && five && five.resetsAt && Math.abs(five.resetsAt - back) < 3 * 60000;
-    var status = '<span class="pill ' + (STATUS_PILL[a.status] || 'idle') + '" title="' + esc((a.statusDetail || '') + (back ? (a.statusDetail ? ' \\u00b7 ' : '') + 'back ' + fmtWhen(back) : '')) + '">'
-      + esc(a.status) + (back ? ' \\u00b7 back in ' + live('left', back) : '') + '</span>'
-      + (a.inFlight ? ' <span class="tag info">' + a.inFlight + ' running</span>' : '')
-      + (u.stale ? ' <span class="tag" title="Usage not refreshed: ' + esc(u.stale) + '">stale</span>' : '');
-    // Week: the all-models weekly window when the plan has one; else the
-    // per-model weekly limit (Team plans: Fable only), named as such.
-    var weekCell = week
-      ? meter(week, s.settings.threshold, 'date') + (scoped.length ? ' <span class="muted small c-wide" title="' + esc(scopedTitle) + '">'
-        + scoped.map(function (w) { return esc(cap(w.model)) + ' ' + (w.percent == null ? '?' : Math.round(w.percent) + '%'); }).join(' \\u00b7 ') + '</span>' : '')
-      : scoped.length
-        ? '<span title="' + esc('No all-models weekly limit on this plan.\\n' + scopedTitle) + '">' + meter(scoped[0], s.settings.threshold, 'date', cap(scoped[0].model) + ' only') + '</span>'
-        : '<span class="muted" title="No weekly limit reported">\\u2014</span>';
-    var html = '<tr class="' + (a.status === 'active' ? 'cur' : '') + (isNext ? ' next' : '') + (a.enabled ? '' : ' off') + '">'
-      + '<td class="ord" title="' + orderTitle + '"><span class="pos">' + (i + 1) + '</span>'
-      + '<button class="mv" data-act="up" data-id="' + esc(a.id) + '"' + (i === 0 || bz('order') ? ' disabled' : '') + ' title="Move up">\\u25b2</button>'
-      + '<button class="mv" data-act="down" data-id="' + esc(a.id) + '"' + (i === last || bz('order') ? ' disabled' : '') + ' title="Move down">\\u25bc</button></td>'
-      + '<td class="name"><div title="' + esc(a.label + ' \\u00b7 ' + (a.email || a.id) + (a.orgName ? ' \\u00b7 ' + a.orgName : '')) + '"><b>' + esc(a.label) + '</b>' + tags
-      + (a.email && a.email !== a.label ? ' <span class="muted small c-wide">' + esc(a.email) + '</span>' : '') + '</div></td>'
+    var money = '<div class="money"><span class="num" title="' + esc(sp && sp.fiveFrom ? 'API-equivalent value of this seat\\x27s current 5h window, from ' + fmtClock(sp.fiveFrom) + ' (reset minus 5h) to now' : 'No 5h window known') + '">'
+      + (sp && sp.fiveFrom ? fmtUsd(sp.fiveUsd) : '\\u2014') + '</span>'
+      + '<span class="num muted small" title="' + esc('Today, ' + TZ + ', since 00:00' + (today ? '\\n' + breakdownLines([today[0], today[1], today[2], today[3]], [today[4], today[5], today[6], today[7]]).join('\\n') : '')) + '">'
+      + (today ? fmtUsd(usdOf(today)) : '$0') + ' today</span></div>';
+    var html = '<tr class="' + (st.state === 'in use' ? 'cur' : '') + (isNext ? ' next' : '') + (a.enabled ? '' : ' off') + '">'
+      + '<td class="ord c-narrow" title="' + (manual ? 'Seat order: breaks ties, and the order of use for fill' : 'Sorted by reset: switch to the manual order to move seats') + '"><span class="pos">' + (i + 1) + '</span>'
+      + (manual ? '<button class="mv" data-act="up" data-id="' + esc(a.id) + '"' + (i === 0 || bz('order') ? ' disabled' : '') + ' title="Move up">\\u25b2</button>'
+        + '<button class="mv" data-act="down" data-id="' + esc(a.id) + '"' + (i === last || bz('order') ? ' disabled' : '') + ' title="Move down">\\u25bc</button>' : '') + '</td>'
+      + '<td class="name"><div title="' + esc(nameTitle) + '"><i class="sw ' + accClass(a.id) + '"></i><b>' + esc(a.label) + '</b>'
+      + (plan ? ' <span class="tag">' + esc(PLAN_SHORT[plan.label] || plan.label) + '</span>' : '')
+      + (isNext ? ' <span class="tag next">next</span>' : '')
+      + ((byEmail[a.email] || []).length > 1 ? ' <span class="tag warn" title="Two seats on one Claude login share one quota">same login as ' + esc(byEmail[a.email].filter(function (l) { return l !== a.label; }).join(', ')) + '</span>' : '')
+      + (urgent ? ' <span class="tag use" title="' + esc(fl + '% of the 5h window is lost at ' + fmtClock(five.resetsAt) + ' if not used') + '">use before ' + esc(fmtClock(five.resetsAt)) + '</span>' : '')
+      + '</div></td>'
       + '<td>' + status + '</td>'
-      + '<td>' + (meter(five, s.settings.threshold, 'count', '', sameReset) || '<span class="muted">\\u2014</span>') + '</td>'
-      + '<td>' + weekCell + '</td>'
-      + '<td class="r c-opt"><span class="num small" title="' + esc(tallyTitle('5h window', t.window5h) + '\\n' + tallyTitle('Week', t.week) + '\\n' + tallyTitle('Total', t.total)) + '">'
-      + fmtTokens(t.window5h.output) + ' out \\u00b7 ' + fmtTokens(sumIn(t.window5h)) + ' in'
-      + (t.window5h.costUsd ? ' \\u00b7 ' + fmtUsd(t.window5h.costUsd) : '') + '</span></td>'
-      + '<td class="r">' + todayCell + '</td>'
+      + '<td>' + (leftMeter(five, s.settings.threshold, false) || '<span class="muted">\\u2014</span>') + '</td>'
+      + '<td class="c-week">' + (week ? leftMeter(week, s.settings.threshold, true) : '') + '</td>'
+      + '<td class="r">' + money + '</td>'
       + '<td><div class="acts">'
       + (needsLogin ? '<button class="primary" data-act="login" data-id="' + esc(a.id) + '"' + bz('login') + '>Log in</button>' : '')
       + '<button class="dots" data-act="more" data-id="' + esc(a.id) + '" title="' + (openDetails[a.id] ? 'Close' : 'Actions') + '">\\u22ef</button>'
@@ -635,7 +675,7 @@ function seatRows(s) {
     rows.push({ key: 'acc:' + a.id, html: html });
     if (openDetails[a.id]) {
       var err = a.lastError ? '<span class="muted small" title="' + esc(a.lastError.message) + '">' + esc(fmtClock(a.lastError.at) + ' ' + a.lastError.message) + '</span>' : '';
-      rows.push({ key: 'det:' + a.id, html: '<tr class="menu"><td colspan="8"><div class="row">'
+      rows.push({ key: 'det:' + a.id, html: '<tr class="menu"><td colspan="7"><div class="row">'
         + '<button data-act="refresh" data-id="' + esc(a.id) + '"' + bz('refresh') + ' title="Refresh usage">Refresh</button>'
         + '<button data-act="test" data-id="' + esc(a.id) + '"' + bz('test') + ' title="Tiny completion on this seat">Test</button>'
         + (needsLogin ? '' : '<button data-act="login" data-id="' + esc(a.id) + '"' + bz('login') + '>Log in again</button>')
@@ -649,7 +689,194 @@ function seatRows(s) {
         + '</div>' + (err ? '<div style="margin-top:4px" class="small">Last error: ' + err + '</div>' : '') + '</td></tr>' });
     }
   });
+  // History the pool no longer has a seat for: so that the rows add up to the header.
+  var extra = unattributedToday(s);
+  if (extra > 0) {
+    rows.push({ key: 'acc:~unattributed', html: '<tr class="off"><td class="ord c-narrow"></td><td class="name"><div title="Removed seats, and usage no transcript ties to a seat"><i class="sw aunk"></i>unattributed</div></td>'
+      + '<td></td><td></td><td class="c-week"></td><td class="r"><div class="money"><span class="num">\\u2014</span><span class="num muted small">' + fmtUsd(extra) + ' today</span></div></td><td></td></tr>' });
+  }
   return rows;
+}
+
+// Today's value of the history rows that are not a seat of the pool.
+function unattributedToday(s) {
+  if (!usage || !usage.daily) return 0;
+  var ids = {};
+  s.accounts.forEach(function (a) { ids[a.id] = 1; });
+  var t = 0;
+  Object.keys(usage.daily).forEach(function (k) {
+    if (ids[k]) return;
+    var c = todayOf(k);
+    if (c) t += usdOf(c);
+  });
+  return t;
+}
+
+// The header: exactly the sums of the rows.
+function seatTotals(s) {
+  var five = 0;
+  var today = unattributedToday(s);
+  s.accounts.forEach(function (a) {
+    var sp = usage && usage.seatSpend ? usage.seatSpend[a.id] : null;
+    if (sp && sp.fiveFrom) five += sp.fiveUsd;
+    var c = todayOf(a.id);
+    if (c) today += usdOf(c);
+  });
+  return { five: five, today: today };
+}
+
+// ---- line charts (quota over time, cumulative usage) ------------------------
+
+// End-of-line labels: wanted y positions, spread so that no two are closer
+// than gap, kept inside [top, bottom]. Returns the y of each label, same order.
+function spreadLabels(ys, gap, top, bottom) {
+  var idx = ys.map(function (y, i) { return i; }).sort(function (a, b) { return ys[a] - ys[b]; });
+  var out = ys.slice();
+  var prev = -Infinity;
+  idx.forEach(function (i) { out[i] = Math.max(ys[i], prev + gap, top); prev = out[i]; });
+  // Pushed past the bottom: walk back up.
+  var next = Infinity;
+  for (var k = idx.length - 1; k >= 0; k--) {
+    var i = idx[k];
+    out[i] = Math.min(out[i], next - gap, bottom);
+    next = out[i];
+  }
+  return out;
+}
+
+// series: [{ id, label, color, pts: [[x, y]...] (solid), proj: [[x, y]...] (dashed), endText }]
+// o: { w, h, x0, x1, yMax, yFmt, xLabel(x), now, slices, sliceTitle(x) }
+function lineChart(series, o) {
+  var W = Math.max(120, Math.round(o.w || 720));
+  var H = Math.max(80, Math.round(o.h || 200));
+  var labelW = Math.min(170, Math.max(90, Math.round(W * 0.18)));
+  var padL = 40;
+  var padR = labelW + 6;
+  var padT = 8;
+  var padB = 16;
+  var plotW = W - padL - padR;
+  var plotH = H - padT - padB;
+  var x0 = o.x0;
+  var x1 = o.x1 > o.x0 ? o.x1 : o.x0 + 1;
+  var yMax = o.yMax > 0 ? o.yMax : 1;
+  var X = function (x) { return padL + plotW * (x - x0) / (x1 - x0); };
+  var Y = function (y) { return padT + plotH - plotH * Math.max(0, Math.min(yMax, y)) / yMax; };
+  var out = '<svg class="chart lines" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(o.label || '') + '">';
+  // Few gridlines.
+  var gstep = niceStep(yMax, Math.max(2, Math.min(4, Math.floor(plotH / 60))));
+  for (var g = 0; gstep > 0 && g * gstep <= yMax + 1e-9; g++) {
+    var gy = Y(g * gstep).toFixed(1);
+    out += '<line class="grid" x1="' + padL + '" x2="' + (padL + plotW) + '" y1="' + gy + '" y2="' + gy + '"/>'
+      + '<text class="ax" x="' + (padL - 5) + '" y="' + (Number(gy) + 3) + '" text-anchor="end">' + esc(o.yFmt(g * gstep)) + '</text>';
+  }
+  // X labels.
+  var ticks = Math.max(2, Math.floor(plotW / 90));
+  for (var t = 0; t <= ticks; t++) {
+    var xv = x0 + (x1 - x0) * t / ticks;
+    out += '<text class="ax" x="' + X(xv).toFixed(1) + '" y="' + (H - 3) + '" text-anchor="' + (t === 0 ? 'start' : t === ticks ? 'end' : 'middle') + '">' + esc(o.xLabel(xv)) + '</text>';
+  }
+  if (o.now && o.now > x0 && o.now < x1) {
+    var nx = X(o.now).toFixed(1);
+    out += '<line class="now" x1="' + nx + '" x2="' + nx + '" y1="' + padT + '" y2="' + (padT + plotH) + '"/>'
+      + '<text class="ax" x="' + nx + '" y="' + (padT + 8) + '" text-anchor="middle">now</text>';
+  }
+  var ends = [];
+  series.forEach(function (sr) {
+    var pts = sr.pts.filter(function (p) { return p[0] >= x0 && p[0] <= x1; });
+    if (pts.length) {
+      out += '<polyline class="ln" style="stroke:' + sr.color + '" points="' + pts.map(function (p) { return X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1); }).join(' ') + '"/>';
+    }
+    if (sr.proj && sr.proj.length) {
+      out += '<polyline class="ln proj" style="stroke:' + sr.color + '" points="' + sr.proj.map(function (p) { return X(Math.min(x1, p[0])).toFixed(1) + ',' + Y(p[1]).toFixed(1); }).join(' ') + '"/>';
+    }
+    var last = pts.length ? pts[pts.length - 1] : null;
+    if (last) ends.push({ sr: sr, y: Y(last[1]), x: X(last[0]) });
+  });
+  var ly = spreadLabels(ends.map(function (e) { return e.y; }), 12, padT + 4, padT + plotH);
+  ends.forEach(function (e, i) {
+    var lx = padL + plotW + 6;
+    out += '<line class="lead" style="stroke:' + e.sr.color + '" x1="' + (padL + plotW).toFixed(1) + '" x2="' + (lx - 2) + '" y1="' + e.y.toFixed(1) + '" y2="' + ly[i].toFixed(1) + '"/>'
+      + '<text class="endl" data-sid="' + esc(e.sr.id) + '" x="' + lx + '" y="' + (ly[i] + 3).toFixed(1) + '" style="fill:' + e.sr.color + '">' + esc(e.sr.label + (e.sr.endText ? ' ' + e.sr.endText : '')) + '</text>';
+  });
+  // Hover: one slice per step, its title lists every series at that instant.
+  var n = Math.max(1, o.slices || 48);
+  for (var k = 0; k < n; k++) {
+    var xa = x0 + (x1 - x0) * k / n;
+    var xb = x0 + (x1 - x0) * (k + 1) / n;
+    out += '<g class="col"><title>' + esc(o.sliceTitle((xa + xb) / 2)) + '</title><rect class="hit" x="' + X(xa).toFixed(1) + '" y="' + padT + '" width="' + (X(xb) - X(xa)).toFixed(1) + '" height="' + plotH + '"/></g>';
+  }
+  return out + '</svg>';
+}
+
+// The value of a step series (readings [[t, v]...]) at time t: the last reading at or before it.
+function stepAt(list, t) {
+  var v = null;
+  for (var i = 0; i < list.length && list[i][0] <= t; i++) v = list[i][1];
+  return v;
+}
+
+// Readings as a step line: flat until the next reading, then straight to it,
+// so a reset is a sharp drop.
+function stepPoints(list, until) {
+  var pts = [];
+  list.forEach(function (p, i) {
+    if (i > 0) pts.push([p[0], list[i - 1][1]]);
+    pts.push([p[0], p[1]]);
+  });
+  if (list.length && until > list[list.length - 1][0]) pts.push([until, list[list.length - 1][1]]);
+  return pts;
+}
+
+var qWin = 'five';
+var qChartDrawn = '';
+function renderQuota() {
+  var box = $('quotaChart');
+  if (!box || !snap || !usage || !usage.quota) return;
+  var now = Date.now();
+  var span = qWin === 'five' ? 24 * 3600000 : 8 * 24 * 3600000;
+  var x0 = now - span;
+  var series = [];
+  var furthest = now;
+  snap.accounts.forEach(function (a) {
+    var q = usage.quota.series[a.id];
+    if (!q) return;
+    var list = (qWin === 'five' ? q.five : q.week).filter(function (p) { return p[0] >= x0 - span; });
+    if (!list.length) return;
+    var cur = list[list.length - 1][1];
+    var reset = qWin === 'five' ? q.fiveReset : q.weekReset;
+    var proj = [];
+    if (reset && reset > now) {
+      // What happens if nothing more is used: flat until the reset, then the drop.
+      proj = [[now, cur], [reset, cur], [reset, 0]];
+      if (reset > furthest) furthest = reset;
+    }
+    series.push({ id: a.id, label: a.label, color: accColor(a.id), pts: stepPoints(list, now), proj: proj, endText: Math.round(cur) + '%', reset: reset, cur: cur });
+  });
+  if (!series.length) {
+    setHtml('quotaChart', '<div class="capnote">No quota reading yet: they are recorded at each usage refresh.</div>');
+    return;
+  }
+  var size = boxSize(box);
+  var x1 = Math.min(furthest, now + (qWin === 'five' ? 5 * 3600000 : 7 * 24 * 3600000));
+  var sel = series;
+  var html = lineChart(sel, {
+    w: size.w, h: size.h, x0: x0, x1: x1, yMax: 100, now: now, slices: 60, label: 'Quota used over time',
+    yFmt: function (v) { return Math.round(v) + '%'; },
+    xLabel: function (x) { return qWin === 'five' ? hourLabel(Math.round(x / 3600000) * 3600000, false) : fmtWhen(x); },
+    sliceTitle: function (x) {
+      return fmtWhen(x) + (x > now ? ' (ahead, if nothing more is used)' : '') + '\\n' + sel.map(function (sr) {
+        var v = x > now ? (sr.reset && x >= sr.reset ? 0 : sr.cur) : stepAt(usage.quota.series[sr.id][qWin === 'five' ? 'five' : 'week'], x);
+        return sr.label + ': ' + (v == null ? '\\u2014' : Math.round(v) + '% used');
+      }).join('\\n');
+    },
+  });
+  if (html !== qChartDrawn) { setHtml('quotaChart', html); qChartDrawn = html; }
+}
+
+function boxSize(el) {
+  var w = el && el.clientWidth;
+  var h = el && el.clientHeight;
+  return { w: w > 100 ? w : 720, h: h > 60 ? h : 220 };
 }
 
 // ---- history (persisted served records) --------------------------------------
@@ -678,16 +905,15 @@ function render() {
   var running = acts.filter(function (a) { return isLive(a.status); });
   var subs = 0;
   acts.forEach(function (a) { a.subagents.forEach(function (x) { if (x.status === 'running') subs++; }); });
-  var usable = s.accounts.filter(function (a) { return a.status === 'ok' || a.status === 'active'; }).length;
+  var usable = s.accounts.filter(function (a) { var x = seatState(a).state; return x === 'ready' || x === 'in use'; }).length;
   var nextBack = s.accounts.map(function (a) { return a.exhaustedUntil; }).filter(Boolean).sort()[0];
   var t = s.totals;
   var today = usageToday();
+  var tt = seatTotals(s);
   setHtml('stats',
-    '<span class="fig" title="' + esc(nextBack ? 'Next seat back ' + fmtWhen(nextBack) : '') + '"><b>' + usable + '</b> / ' + s.accounts.length + ' usable</span>'
-    + '<span class="fig" title="' + esc(tallyTitle('5h windows', t.window5h)) + '">5h <b>' + fmtTokens(t.window5h.output) + '</b> out \\u00b7 ' + fmtTokens(sumIn(t.window5h)) + ' in</span>'
-    + '<span class="fig c-opt" title="' + esc(tallyTitle('Week', t.week)) + '">week <b>' + fmtTokens(t.week.output) + '</b> out</span>'
-    + '<span class="fig" title="' + esc(today ? breakdownLines([today[0], today[1], today[2], today[3]], [today[4], today[5], today[6], today[7]]).join('\\n') : '') + '">today <b>'
-    + (today ? fmtUsd(usdOf(today)) : '\\u2014') + '</b></span>');
+    '<span class="fig" title="' + esc(nextBack ? 'Next seat back ' + fmtWhen(nextBack) : '') + '"><b>' + usable + '</b> / ' + s.accounts.length + ' ready</span>'
+    + '<span class="fig" title="Sum of the current 5h windows of the seats, API-equivalent">5h windows <b>' + fmtUsd(tt.five) + '</b></span>'
+    + '<span class="fig" title="' + esc('Today, ' + TZ + ', since 00:00: the sum of the rows') + '">today <b>' + fmtUsd(tt.today) + '</b></span>');
 
   var strat = $('strategy');
   if (document.activeElement !== strat && strat.value !== s.settings.strategy) strat.value = s.settings.strategy;
@@ -705,10 +931,16 @@ function render() {
   $('actEmpty').hidden = acts.length !== 0;
 
   sync($('acc'), seatRows(s));
+  var sname = STRATEGY_NAMES[s.settings.strategy] || s.settings.strategy;
   setHtml('seatFacts',
-    (s.next ? '<span title="Seat a new conversation gets now">Next: <b>' + esc(s.next.label) + '</b> \\u00b7 ' + esc(s.next.why) + '</span>' : '<span>Next: <b>none usable</b></span>')
-    + '<span>Strategy: <b>' + esc(STRATEGY_NAMES[s.settings.strategy] || s.settings.strategy) + '</b> \\u00b7 switch at ' + s.settings.threshold + '%</span>'
-    + (nextBack ? '<span>Next seat back: <b>' + esc(fmtWhen(nextBack)) + '</b></span>' : ''));
+    (s.next ? '<span title="Seat a new conversation gets now; a running conversation keeps its seat">Next: <b>' + esc(s.next.label) + '</b> \\u2014 ' + esc(s.next.why) + ' (' + esc(sname) + ')</span>'
+      : '<span>Next: <b>none ready</b></span>')
+    + '<span class="c-opt">switch at ' + s.settings.threshold + '%</span>'
+    + (nextBack ? '<span>next back <b>' + esc(fmtClock(nextBack)) + '</b></span>' : ''));
+  var so = $('seatSort');
+  var want = s.settings.seatSort === 'reset' ? 'reset' : 'manual';
+  if (document.activeElement !== so && so.value !== want) so.value = want;
+  renderQuota();
 
   var recent = s.recent || [];
   setText('histCount', recent.length ? String(Math.min(recent.length, 8)) : '');
@@ -752,6 +984,8 @@ var usagePolling = false;
 var uSel = 'all';
 var uMetric = 'cost';
 var uView = 'overview';
+// Overview drawn as stacked bars, or as one cumulative line per seat.
+var uChart = 'bars';
 var uHours = 24;
 // 0 = since the first day with data (at least 7 days).
 var uDays = 0;
@@ -769,6 +1003,7 @@ function pollUsage() {
     } else {
       usage = r;
       renderUsage();
+      qChartDrawn = '';
       render();
     }
   }, function (err) {
@@ -839,14 +1074,24 @@ function rowsOf(map, acc, len) {
 }
 
 // Colour follows the seat (its rank in seat order), never its volume.
+function accIndex(id) {
+  var ids = [];
+  if (snap && snap.accounts) snap.accounts.forEach(function (a) { ids.push(a.id); });
+  if (usage && usage.accounts) usage.accounts.forEach(function (a) { if (a.id !== 'unknown' && ids.indexOf(a.id) < 0) ids.push(a.id); });
+  return ids.indexOf(id);
+}
 function accClass(id) {
   if (id === 'unknown') return 'aunk';
-  var i = 0;
-  var idx = -1;
-  usage.accounts.forEach(function (a) { if (a.id === 'unknown') return; if (a.id === id) idx = i; i++; });
-  return idx >= 0 && idx < 8 ? 'a' + idx : 'aoth';
+  var idx = accIndex(id);
+  return idx >= 0 && idx < 10 ? 'a' + idx : 'aoth';
+}
+function accColor(id) {
+  if (id === 'unknown') return 'var(--sunk)';
+  var idx = accIndex(id);
+  return idx >= 0 && idx < 10 ? 'var(--s' + (idx + 1) + ')' : 'var(--muted)';
 }
 function accLabel(id) {
+  if (!usage) return id;
   var a = usage.accounts.filter(function (x) { return x.id === id; })[0];
   return a ? a.label : id;
 }
@@ -1106,6 +1351,38 @@ function overviewSeries(u, accs, pd, daily) {
   return gr;
 }
 
+// Overview as lines: each seat's consumption summed over the period, its name at the end of its line.
+function cumulativeLines(gr, accs, ocols, size) {
+  var first = 0;
+  if (uDays === 0) {
+    while (first < gr.labels.length - 1 && !accs.some(function (a) { return total(gr.rows[a.id][first]) > 0; })) first++;
+  }
+  var n = gr.labels.length;
+  var max = 0;
+  var cum = {};
+  var series = accs.map(function (a) {
+    var run = 0;
+    var pts = [];
+    cum[a.id] = [];
+    for (var i = first; i < n; i++) {
+      run += total(gr.rows[a.id][i]);
+      pts.push([i, run]);
+      cum[a.id].push(run);
+    }
+    if (run > max) max = run;
+    return { id: a.id, label: a.label, color: accColor(a.id), pts: pts, endText: fmtVal(run) };
+  }).filter(function (sr) { return sr.pts.length && sr.pts[sr.pts.length - 1][1] > 0; });
+  return lineChart(series, {
+    w: size.w, h: size.h, x0: first, x1: Math.max(first + 1, n - 1), yMax: max * 1.08, slices: Math.max(1, n - first), label: 'Cumulative usage by seat',
+    yFmt: fmtVal,
+    xLabel: function (x) { var i = Math.round(x); return i >= 0 && i < n ? gr.label(gr.labels[i], i - first) : ''; },
+    sliceTitle: function (x) {
+      var i = Math.max(first, Math.min(n - 1, Math.floor(x)));
+      return gr.head(gr.labels[i]) + ' (cumulated)\\n' + series.map(function (sr) { return sr.label + ': ' + fmtVal(cum[sr.id][i - first]); }).join('\\n');
+    },
+  });
+}
+
 function renderUsage() {
   var u = usage;
   if (!u) return;
@@ -1115,6 +1392,8 @@ function renderUsage() {
   $('useBody').hidden = accs.length === 0;
   setSeg('umetric', uMetric);
   setSeg('uview', uView);
+  setSeg('uchart', uChart);
+  $('uchartSeg').hidden = uView !== 'overview';
   var hourly = uView === 'hourly';
   var pv = hourly ? String(uHours) : String(uDays);
   var popts = hourly ? [['24', '24h'], ['48', '48h']] : [['0', 'Since ' + fmtDay(u.days && u.days[0] ? u.days[0] : dayKey(new Date()))], ['7', '7d'], ['30', '30d'], ['90', '90d']];
@@ -1169,8 +1448,13 @@ function renderUsage() {
         });
         return { label: gr.label(d, i), title: cellLines(lines.join('\\n'), tot), segs: segs, raw: [tokOf(tot), usdOf(tot)] };
       });
-      html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + gr.unit + ' by seat', trim: uDays === 0, labelW: gr.labelW });
-      legend = accs.map(function (a) { return '<span><i class="sw ' + accClass(a.id) + '"></i>' + esc(a.label) + '</span>'; }).join('');
+      if (uChart === 'lines') {
+        html = cumulativeLines(gr, accs, ocols, size);
+        legend = '';
+      } else {
+        html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + gr.unit + ' by seat', trim: uDays === 0, labelW: gr.labelW });
+        legend = accs.map(function (a) { return '<span><i class="sw ' + accClass(a.id) + '"></i>' + esc(a.label) + '</span>'; }).join('');
+      }
     } else {
       // One small chart per seat, all on the same scale. A click opens that seat in Daily.
       var shared = 0;
@@ -1258,6 +1542,8 @@ function onAct(b) {
   var a = accountOf(id);
   if (act === 'flash-close') { flash('', ''); return; }
   if (act === 'runs') { actOpen = !actOpen; render(); return; }
+  if (act === 'qwin') { qWin = id === 'week' ? 'week' : 'five'; setSeg('qwin', qWin); qChartDrawn = ''; renderQuota(); return; }
+  if (act === 'uchart') { uChart = id === 'lines' ? 'lines' : 'bars'; renderUsage(); return; }
   if (act === 'usel') { uSel = id; uView = 'daily'; renderUsage(); return; }
   if (act === 'umetric') { uMetric = id === 'cost' ? 'cost' : 'tokens'; renderUsage(); return; }
   if (act === 'uview') { uView = id; renderUsage(); return; }
@@ -1327,6 +1613,9 @@ $('threshold').addEventListener('change', function () {
   if (!(n >= 1 && n <= 100)) { flash('err', 'Switch threshold must be 1 to 100.'); return; }
   return run('settings', 'updateSettings', { threshold: n });
 });
+$('seatSort').addEventListener('change', function () {
+  return run('settings', 'updateSettings', { seatSort: $('seatSort').value });
+});
 $('useAcc').addEventListener('change', function () { uSel = $('useAcc').value || 'all'; renderUsage(); });
 $('usePeriod').addEventListener('change', function () {
   var v = Number($('usePeriod').value);
@@ -1342,15 +1631,18 @@ function onResize() {
   resizeTimer = setTimeout(function () {
     resizeTimer = 0;
     var z = chartSize();
-    var key = z.w + 'x' + z.h;
+    var q = boxSize($('quotaChart'));
+    var key = z.w + 'x' + z.h + '/' + q.w + 'x' + q.h;
     if (key === lastSize) return;
     lastSize = key;
     renderUsage();
+    qChartDrawn = '';
+    renderQuota();
   }, 120);
 }
 window.addEventListener('resize', onResize);
 if (typeof ResizeObserver === 'function') {
-  try { new ResizeObserver(onResize).observe($('useChart')); } catch (e) { /* the window listener is enough */ }
+  try { var ro = new ResizeObserver(onResize); ro.observe($('useChart')); ro.observe($('quotaChart')); } catch (e) { /* the window listener is enough */ }
 }
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) {
@@ -1402,6 +1694,7 @@ export function renderDashboard(): string {
     <div class="zh">
       <span class="row" id="stats"></span>
       <span class="spacer"></span>
+      <select class="field" id="seatSort" title="Row order"><option value="manual">manual order</option><option value="reset">by reset</option></select>
       <button class="runs" id="runsBtn" data-act="runs" title="Turns running on the seats"><span class="dot"></span><span id="actCount">0 running</span></button>
     </div>
     <div class="drop" id="actPanel" hidden>
@@ -1419,11 +1712,16 @@ export function renderDashboard(): string {
     </div>
     <div class="zb">
       <table>
-        <thead><tr><th title="Order of use">#</th><th>Seat</th><th>Status</th><th>5h</th><th>Week</th><th class="r c-opt">Tokens 5h</th><th class="r">Today</th><th></th></tr></thead>
+        <thead><tr><th class="c-narrow" title="Seat order">#</th><th>Seat</th><th>Status</th><th title="5h window left, and its reset">5h left</th><th class="c-week" title="Weekly window left, and its reset">Week left</th><th class="r" title="API-equivalent value: current 5h window, and today">$</th><th></th></tr></thead>
         <tbody id="acc"></tbody>
       </table>
     </div>
     <div class="facts" id="seatFacts"></div>
+  </section>
+  <section class="zone grow">
+    <div class="zh"><b>Quota over time</b><span class="muted small">used, with the drop at each reset; dashed: if nothing more is used</span><span class="spacer"></span>
+      <span class="seg"><button class="on" data-act="qwin" data-id="five">5h</button><button data-act="qwin" data-id="week">Week</button></span></div>
+    <div class="qbox" id="quotaChart"></div>
   </section>
 </div>
 
@@ -1435,6 +1733,7 @@ export function renderDashboard(): string {
       <span class="spacer"></span>
       <select class="field" id="useAcc" title="Seat"></select>
       <select class="field" id="usePeriod" title="Period"></select>
+      <span class="seg" id="uchartSeg"><button data-act="uchart" data-id="bars">Bars</button><button data-act="uchart" data-id="lines">Lines</button></span>
       <span class="seg"><button data-act="umetric" data-id="tokens">Tokens</button><button data-act="umetric" data-id="cost">$</button></span>
     </div>
     <div class="empty" id="useEmpty">No usage recorded yet.</div>
