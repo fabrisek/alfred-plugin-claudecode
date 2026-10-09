@@ -24,7 +24,7 @@ import type {
 } from '@alfred/sdk';
 import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from '../accounts/pool.js';
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
-import { isAdvisorRefusal, type AdvisorPolicy } from '../accounts/advisor.js';
+import { cliThread, isAdvisorRefusal, type AdvisorPolicy } from '../accounts/advisor.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery, splitModel } from '../ClaudeCodeProvider.js';
 import { seatForResume, SESSION_ID_RE, type SessionIndex } from '../session/sessions.js';
@@ -500,8 +500,9 @@ export class ClaudeSessionAdapter {
     // No thinking mode chosen = `high`, as engine turns: never the CLI's own default.
     const effort = req.effort ?? 'high';
     if (EFFORT_LEVELS.includes(effort) && cli.native) options.effort = effort;
-    // The server-side advisor, unless off or refused by the API on this seat.
-    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    // The server-side advisor: conversations the user talks to, not delegated
+    // sub-agents (advisorScope), unless refused by the API on this seat.
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id, cliThread(req.conversationId));
     if (advisorSettings) options.settings = advisorSettings;
     const mcp = req.mcpServers ?? [];
     if (mcp.length) {

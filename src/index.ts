@@ -38,7 +38,7 @@ import {
 } from './agentSession/ClaudeSessionAdapter.js';
 import { ClaudeCodeSessionProvider } from './agentSession/ClaudeSessionProvider.js';
 import { CliProcessTracker } from './agentSession/processTracker.js';
-import { AdvisorPolicy } from './accounts/advisor.js';
+import { AdvisorPolicy, isAdvisorScope } from './accounts/advisor.js';
 
 /** Advisor of every Claude session Alfred starts; empty in the settings = off. */
 export const DEFAULT_ADVISOR_MODEL = 'fable';
@@ -285,7 +285,13 @@ const plugin: AlfredPlugin = {
     shareSeats();
     const sessionIndex = new SessionIndex(join(ctx.dataDir, 'sessions.json'));
     // Server-side advisor on every CLI this plugin starts (accounts/advisor.ts).
-    const advisor = new AdvisorPolicy(resolveAdvisorModel(ctx.config), ctx.logger);
+    // Default scope `main`: only the conversations the user talks to.
+    const advisor = new AdvisorPolicy(
+      resolveAdvisorModel(ctx.config),
+      ctx.logger,
+      Date.now,
+      isAdvisorScope(ctx.config.advisorScope) ? ctx.config.advisorScope : 'main',
+    );
 
     const providerOpts = {
       config: cfg,
@@ -576,7 +582,7 @@ const plugin: AlfredPlugin = {
       accounts: pool.list().length,
       cli: cli.source,
       strategy: pool.settings.strategy,
-      advisor: advisor.model || 'off',
+      advisor: advisor.enabled ? `${advisor.model} (${advisor.scope})` : 'off',
     });
   },
 
@@ -654,6 +660,8 @@ function snapshot(pool: AccountPool, cli: CliInfo, advisor?: AdvisorPolicy): Rec
     settings: pool.settings,
     // Configured advisor model ('' = off); per seat: accounts[].advisor.
     advisorModel: advisor?.model ?? '',
+    // main | all | off: which CLIs get it.
+    advisorScope: advisor?.scope ?? 'off',
     cli: cli.path ? `CLI: ${cli.source}` : 'CLI: bundled (no live usage)',
     accounts,
     totals,

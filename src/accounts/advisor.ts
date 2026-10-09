@@ -14,13 +14,58 @@
  * takes the advisor off that seat for a while; the request is replayed there
  * without it, never moved to another seat for that.
  *
+ * Scope (`advisorScope`): an advisor call re-reads the whole context with no
+ * cache, so by default (`main`) only the conversations the user talks to get
+ * it: not delegated sub-agents (`par-*` conversations, delegation threads),
+ * not one-off calls without a thread, not claude_code_run. `all` = every CLI,
+ * `off` = none. The class of a thread derives from its conversation id and
+ * thread key only, so a session keeps the same advisor setting all its life.
+ *
+ * A seat that refuses the advisor gets the setting anyway: each new CLI
+ * process asks the API again, so a seat whose usage credits were enabled and
+ * accepted since starts using it without a reload.
+ *
  * Cache: the advisor adds a tool and a system-prompt section, so turning it on
  * or off in an existing session (resume, seat switch between a seat that has
- * it and one that does not) rewrites that session's cached prefix once.
- * Steady state caches as before.
+ * it and one that does not, a seat that just got it) rewrites that session's
+ * cached prefix once. Steady state caches as before.
  */
 
 import type { Logger } from '@alfred/sdk';
+
+export const ADVISOR_SCOPES = ['main', 'all', 'off'] as const;
+export type AdvisorScope = (typeof ADVISOR_SCOPES)[number];
+
+/**
+ * Kind of CLI being started: `main` = a conversation the user talks to,
+ * `sub` = a delegated sub-agent or a one-off call, `run` = claude_code_run.
+ */
+export type AdvisorThread = 'main' | 'sub' | 'run';
+
+export function isAdvisorScope(v: unknown): v is AdvisorScope {
+  return typeof v === 'string' && (ADVISOR_SCOPES as readonly string[]).includes(v);
+}
+
+/** Sub-conversations of a delegation (`par-<task>-<ts>`, core ParallelDelegation). */
+const DELEGATION_CONVERSATION = /^par-/;
+
+/** A CLI-mode turn: its conversation is the user's, or a delegation's. */
+export function cliThread(conversationId: string | undefined): AdvisorThread {
+  return conversationId && !DELEGATION_CONVERSATION.test(conversationId) ? 'main' : 'sub';
+}
+
+/**
+ * An engine request: its thread key is `<conversation>|<agent>|<task>`
+ * (core TurnLoop); no key = a one-off call, `task` or a task part = a
+ * delegated sub-agent.
+ */
+export function engineThread(req: { session?: { key?: unknown; task?: unknown } }): AdvisorThread {
+  const key = req.session?.key;
+  if (typeof key !== 'string' || !key || req.session?.task === true) return 'sub';
+  const [conversation, , task] = key.split('|');
+  if (task) return 'sub';
+  return cliThread(conversation);
+}
 
 export type AdvisorSeatView = {
   /** active = the CLI sends the advisor; unavailable = the seat refuses it; incompatible = the API refused it. */
@@ -61,15 +106,25 @@ export class AdvisorPolicy {
     readonly model: string,
     private readonly log: Logger,
     private readonly now: () => number = Date.now,
+    /** Which CLIs get it (see the file header). */
+    readonly scope: AdvisorScope = 'main',
   ) {}
 
   get enabled(): boolean {
-    return this.model !== '';
+    return this.model !== '' && this.scope !== 'off';
   }
 
-  /** Flag settings for a CLI on this seat, or none (advisor off, or paused after an API refusal). */
-  settingsFor(accountId: string): { advisorModel: string } | undefined {
-    if (!this.enabled) return undefined;
+  /** Whether this kind of CLI gets the advisor at all, whatever the seat. */
+  covers(thread: AdvisorThread): boolean {
+    return this.enabled && (this.scope === 'all' || thread === 'main');
+  }
+
+  /**
+   * Flag settings for a CLI of this kind on this seat, or none (advisor off,
+   * out of scope, or paused on the seat after an API refusal).
+   */
+  settingsFor(accountId: string, thread: AdvisorThread): { advisorModel: string } | undefined {
+    if (!this.covers(thread)) return undefined;
     const until = this.pausedUntil.get(accountId);
     if (until !== undefined) {
       if (until > this.now()) return undefined;

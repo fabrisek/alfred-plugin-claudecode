@@ -15,7 +15,7 @@ import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample }
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
 import type { CliProcessTracker } from './agentSession/processTracker.js';
-import { isAdvisorRefusal, type AdvisorPolicy } from './accounts/advisor.js';
+import { engineThread, isAdvisorRefusal, type AdvisorPolicy } from './accounts/advisor.js';
 import { ToolCallCutter } from './toolCallCutter.js';
 import {
   ASSISTANT_SLOT,
@@ -613,8 +613,9 @@ export class ClaudeCodeProvider implements LLMProvider {
         effort = e;
       }
     }
-    // The server-side advisor, unless off or refused by the API on this seat.
-    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    // The server-side advisor: conversations the user talks to (advisorScope),
+    // unless refused by the API on this seat.
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id, engineThread(req));
     if (advisorSettings) options.settings = advisorSettings;
     const advisorModel = advisorSettings?.advisorModel;
 

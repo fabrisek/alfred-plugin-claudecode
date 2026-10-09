@@ -94,8 +94,16 @@
       "advisorModel": {
         "type": "string",
         "label": "Advisor model",
-        "description": "Server-side advisor of every Claude session Alfred starts (conversations, sub-agents, claude_code_run): the model consults it on its own, the advisor sees the whole conversation. Alias or id (fable, opus). Empty = no advisor. A seat that may not use it (Fable as advisor needs usage credits enabled and accepted on that seat with /model fable) runs without it. Needs a plugin reload.",
+        "description": "Server-side advisor of the Claude sessions Alfred starts (which ones: Advisor scope): the model consults it on its own, the advisor sees the whole conversation. Alias or id (fable, opus). Empty = no advisor. A seat that may not use it (Fable as advisor needs usage credits enabled and accepted on that seat with /model fable) runs without it. Needs a plugin reload.",
         "default": "fable",
+        "group": "Chat"
+      },
+      "advisorScope": {
+        "type": "string",
+        "label": "Advisor scope",
+        "description": "Which Claude sessions get the advisor. An advisor call re-reads the whole conversation with no cache (about $0.20 to $2 a call). main = only the conversations you talk to directly; all = also delegated sub-agents and claude_code_run; off = none. Needs a plugin reload.",
+        "default": "main",
+        "enum": ["main", "all", "off"],
         "group": "Chat"
       },
       "sharedSessionStore": {

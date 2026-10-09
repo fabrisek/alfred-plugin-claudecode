@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { AccountPool } from '../src/accounts/pool.js';
-import { AdvisorPolicy, INCOMPATIBLE_PAUSE_MS, isAdvisorRefusal } from '../src/accounts/advisor.js';
+import { AdvisorPolicy, INCOMPATIBLE_PAUSE_MS, cliThread, engineThread, isAdvisorRefusal } from '../src/accounts/advisor.js';
 import { ClaudeCodeProvider, __setQueryForTests } from '../src/ClaudeCodeProvider.js';
 
 const logs: Array<[string, string, Record<string, unknown> | undefined]> = [];
@@ -32,10 +32,10 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('advisor policy', () => {
   it('sends the configured advisor on every seat; empty = off', () => {
-    assert.deepEqual(new AdvisorPolicy('fable', logger).settingsFor('a'), { advisorModel: 'fable' });
+    assert.deepEqual(new AdvisorPolicy('fable', logger).settingsFor('a', 'main'), { advisorModel: 'fable' });
     const off = new AdvisorPolicy('', logger);
     assert.equal(off.enabled, false);
-    assert.equal(off.settingsFor('a'), undefined);
+    assert.equal(off.settingsFor('a', 'main'), undefined);
   });
 
   it('reads what the CLI applied: active, or unavailable on a seat that refuses it, logged once', async () => {
@@ -51,7 +51,7 @@ describe('advisor policy', () => {
     assert.equal(p.view('standard')?.state, 'unavailable');
     assert.match(p.view('standard')?.reason ?? '', /usage credits/);
     // A seat that refuses it keeps its advisor setting: nothing changes in its launches.
-    assert.deepEqual(p.settingsFor('standard'), { advisorModel: 'fable' });
+    assert.deepEqual(p.settingsFor('standard', 'main'), { advisorModel: 'fable' });
     assert.equal(logs.filter((l) => l[1].startsWith('advisor not available')).length, 1);
   });
 
@@ -67,11 +67,11 @@ describe('advisor policy', () => {
     let now = 1_000;
     const p = new AdvisorPolicy('fable', logger, () => now);
     p.markIncompatible('a', '400 advisor_incompatible');
-    assert.equal(p.settingsFor('a'), undefined);
-    assert.deepEqual(p.settingsFor('b'), { advisorModel: 'fable' });
+    assert.equal(p.settingsFor('a', 'main'), undefined);
+    assert.deepEqual(p.settingsFor('b', 'main'), { advisorModel: 'fable' });
     assert.equal(p.view('a')?.state, 'incompatible');
     now += INCOMPATIBLE_PAUSE_MS + 1;
-    assert.deepEqual(p.settingsFor('a'), { advisorModel: 'fable' });
+    assert.deepEqual(p.settingsFor('a', 'main'), { advisorModel: 'fable' });
   });
 
   it('recognises the CLI wording of an advisor refusal, nothing else', () => {
@@ -119,7 +119,7 @@ describe('advisor on engine requests', () => {
         yield okResult;
       })();
     }) as never);
-    const p = new ClaudeCodeProvider({ config: cfg, pool: makePool(1), cli, logger, advisor: new AdvisorPolicy('fable', logger) });
+    const p = new ClaudeCodeProvider({ config: cfg, pool: makePool(1), cli, logger, advisor: new AdvisorPolicy('fable', logger, Date.now, 'all') });
     await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
     assert.deepEqual(seen, [{ advisorModel: 'fable' }]);
     // Off: no settings at all.
@@ -139,7 +139,7 @@ describe('advisor on engine requests', () => {
       })();
     }) as never);
     const pool = makePool(2);
-    const advisor = new AdvisorPolicy('fable', logger);
+    const advisor = new AdvisorPolicy('fable', logger, Date.now, 'all');
     const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger, advisor });
     const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
     assert.equal(res.content, 'answer');
@@ -162,8 +162,101 @@ describe('advisor on engine requests', () => {
         yield { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 500 boom' };
       })();
     }) as never);
-    const p = new ClaudeCodeProvider({ config: cfg, pool: makePool(1), cli, logger, advisor: new AdvisorPolicy('fable', logger) });
+    const p = new ClaudeCodeProvider({ config: cfg, pool: makePool(1), cli, logger, advisor: new AdvisorPolicy('fable', logger, Date.now, 'all') });
     await assert.rejects(p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] }), /boom/);
     assert.equal(calls.length, 1);
+  });
+});
+
+describe('advisor scope', () => {
+  it('main (default): only the conversations the user talks to; all; off', () => {
+    const main = new AdvisorPolicy('fable', logger);
+    assert.equal(main.scope, 'main');
+    assert.deepEqual(main.settingsFor('a', 'main'), { advisorModel: 'fable' });
+    assert.equal(main.settingsFor('a', 'sub'), undefined);
+    assert.equal(main.settingsFor('a', 'run'), undefined);
+    const all = new AdvisorPolicy('fable', logger, Date.now, 'all');
+    assert.deepEqual(all.settingsFor('a', 'sub'), { advisorModel: 'fable' });
+    assert.deepEqual(all.settingsFor('a', 'run'), { advisorModel: 'fable' });
+    const off = new AdvisorPolicy('fable', logger, Date.now, 'off');
+    assert.equal(off.enabled, false);
+    assert.equal(off.settingsFor('a', 'main'), undefined);
+  });
+
+  it('classifies threads from the conversation id and the thread key only', () => {
+    // Real ids: a user conversation, a delegation sub-conversation (core ParallelDelegation).
+    assert.equal(cliThread('83d7fb69-22a8-4d3c-a740-e5d5b2c66879'), 'main');
+    assert.equal(cliThread('par-r-0178b4a1-muzvhr22'), 'sub');
+    assert.equal(cliThread(undefined), 'sub');
+    assert.equal(engineThread({ session: { key: '83d7fb69-22a8-4d3c-a740-e5d5b2c66879|alfred|', task: false } }), 'main');
+    assert.equal(engineThread({ session: { key: '83d7fb69-22a8-4d3c-a740-e5d5b2c66879|coder|task-12', task: true } }), 'sub');
+    assert.equal(engineThread({ session: { key: '83d7fb69|coder|task-12' } }), 'sub');
+    assert.equal(engineThread({ session: { key: 'par-r-0178b4a1-muzvhr22|coder|', task: false } }), 'sub');
+    // One-off calls (titles, summaries, probes) carry no thread.
+    assert.equal(engineThread({}), 'sub');
+  });
+});
+
+describe('advisor scope on real launch points', () => {
+  const cfg = { oauthToken: '', modelsRaw: 'opus', contextWindow: 200000, pathToClaude: '', requestTimeoutMs: 5000, maxConcurrentRequests: 16, maxParallelTasks: 32 };
+  function makePool(): AccountPool {
+    const pool = new AccountPool({ dataDir: mkdtempSync(join(dir, 'p-')), logger });
+    pool.remove('default');
+    pool.setToken(pool.add('Seat 1', 'token').id, 'tok-1');
+    return pool;
+  }
+
+  it('engine: the main thread gets it, its sub-agent thread does not', async () => {
+    const seen: unknown[] = [];
+    __setQueryForTests(((args: { options?: { settings?: unknown } }) => {
+      seen.push(args.options?.settings);
+      return (async function* () {
+        yield textDelta('hi');
+        yield okResult;
+      })();
+    }) as never);
+    const p = new ClaudeCodeProvider({ config: cfg, pool: makePool(), cli: { path: '', native: false, source: 'bundled' as const }, logger, advisor: new AdvisorPolicy('fable', logger) });
+    await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }], session: { key: 'conv-1|alfred|', task: false } } as never);
+    await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }], session: { key: 'conv-1|coder|task-1', task: true } } as never);
+    await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
+    assert.deepEqual(seen, [{ advisorModel: 'fable' }, undefined, undefined]);
+  });
+
+  it('CLI mode: a user conversation gets it, a delegation conversation does not', async () => {
+    const { ClaudeSessionAdapter, DEFAULT_CHAT_SESSION_CONFIG } = await import('../src/agentSession/ClaudeSessionAdapter.js');
+    const { SessionIndex } = await import('../src/session/sessions.js');
+    const seen: unknown[] = [];
+    __setQueryForTests(((args: { options?: { settings?: unknown } }) => {
+      seen.push(args.options?.settings);
+      return Object.assign(
+        (async function* () {
+          yield { type: 'system', subtype: 'init', session_id: '11111111-1111-4111-8111-111111111111', model: 'claude-opus-5-5', tools: [] };
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'hi', usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0 };
+        })(),
+        { interrupt: async () => undefined },
+      );
+    }) as never);
+    const adapter = new ClaudeSessionAdapter({
+      pool: makePool(),
+      cli: { path: '', native: true, source: 'setting' as const },
+      sessions: new SessionIndex(join(dir, `idx-${Math.random().toString(36).slice(2)}.json`)),
+      logger,
+      config: { ...DEFAULT_CHAT_SESSION_CONFIG, startTimeoutMs: 5_000 },
+      crossSeat: () => true,
+      advisor: new AdvisorPolicy('fable', logger),
+    });
+    const turn = (conversationId: string) => ({
+      turnId: `t-${Math.random().toString(36).slice(2)}`,
+      conversationId,
+      cwd: dir,
+      additionalDirectories: [],
+      input: { clientMessageId: 'c1', text: 'hi' },
+      model: 'opus',
+      permissionMode: 'bypassPermissions',
+      mcpServers: [],
+    });
+    for await (const _ of adapter.runSessionTurn(turn('83d7fb69-22a8-4d3c-a740-e5d5b2c66879') as never)) void _;
+    for await (const _ of adapter.runSessionTurn(turn('par-r-0178b4a1-muzvhr22') as never)) void _;
+    assert.deepEqual(seen, [{ advisorModel: 'fable' }, undefined]);
   });
 });

@@ -393,8 +393,8 @@ export class SessionRunner {
     if (req.sessionId) options.resume = req.sessionId;
     if (cli.path) options.pathToClaudeCodeExecutable = cli.path;
     if (cli.native && req.effort) options.extraArgs = { effort: req.effort };
-    // The server-side advisor, unless off or refused by the API on this seat.
-    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    // The server-side advisor, only when advisorScope covers claude_code_run (`all`).
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id, 'run');
     if (advisorSettings) options.settings = advisorSettings;
     if (this.opts.tracker) {
       // Own spawn: the SDK then forwards no stderr, so the tracker does.
