@@ -267,6 +267,27 @@ describe('seat attribution from the transcript login', () => {
     assert.equal(t2['seat-b'][5], 65);
   });
 
+  it('counts a response once when its message.id repeats, advisor iterations included', async () => {
+    const root = join(tmp, 'projects-dup');
+    const dir = join(root, 'C--Users-u-Documents-alfred-agent-apps-gateway');
+    mkdirSync(dir, { recursive: true });
+    const usage = {
+      input_tokens: 4, cache_creation_input_tokens: 0, cache_read_input_tokens: 100, output_tokens: 30,
+      iterations: [
+        { type: 'message', input_tokens: 4, output_tokens: 30, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+        { type: 'advisor_message', model: 'claude-fable-5-1', input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      ],
+    };
+    // One entry per content block (thinking, text, tool_use): the same id and usage three times.
+    const entry = JSON.stringify({ type: 'assistant', timestamp: new Date(NOW - HOUR_MS).toISOString(), message: { id: 'msg_dup', model: 'claude-opus-5-5', usage } }) + '\n';
+    writeFileSync(join(dir, 'd1.jsonl'), entry + entry + entry);
+    const store = new UsageStore(join(tmp, 'dup-state.json'), () => NOW);
+    await new TranscriptScanner({ store, roots: () => [root], accountOf: () => undefined }).scan();
+    const m = store.totalsByModel();
+    assert.deepEqual(m['claude-opus-5-5'], [1, 4, 0, 0, 100, 30]);
+    assert.deepEqual(m['claude-fable-5-1@advisor'], [0, 1000, 0, 0, 0, 50]);
+  });
+
   it('rebuilds a store saved by another attribution revision', () => {
     const path = freshPath();
     const s1 = new UsageStore(path, () => NOW, 2);

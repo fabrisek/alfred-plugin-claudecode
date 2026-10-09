@@ -609,6 +609,16 @@ function todayOf(id) {
 }
 var TZ = (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'; } catch (e) { return 'local time'; } })();
 
+// The advisor on this seat, as the CLI reported it (null: not seen yet, or off).
+var ADVISOR_TAG = { active: 'info', unavailable: 'warn', incompatible: 'warn' };
+function advisorPill(ad) {
+  if (!ad || !ad.state) return '';
+  var name = shortModel(ad.model || '');
+  var title = 'Advisor ' + (name || '') + ': ' + ad.state + (ad.reason ? '\\n' + ad.reason : '') + (ad.at ? '\\nseen ' + fmtWhen(ad.at) : '');
+  var text = ad.state === 'active' ? 'advisor' : ad.state === 'unavailable' ? 'no advisor' : 'advisor \\u2715';
+  return ' <span class="tag ' + (ADVISOR_TAG[ad.state] || '') + '" title="' + esc(title) + '">' + text + '</span>';
+}
+
 // Seats in the order the panel shows them: the manual order, or the soonest 5h reset first.
 function seatOrder(s) {
   var list = s.accounts.slice();
@@ -661,6 +671,7 @@ function seatRows(s) {
       + '<td class="name"><div title="' + esc(nameTitle) + '"><i class="sw ' + accClass(a.id) + '"></i><b>' + esc(a.label) + '</b>'
       + (plan ? ' <span class="tag">' + esc(PLAN_SHORT[plan.label] || plan.label) + '</span>' : '')
       + (isNext ? ' <span class="tag next">next</span>' : '')
+      + advisorPill(a.advisor)
       + ((byEmail[a.email] || []).length > 1 ? ' <span class="tag warn" title="Two seats on one Claude login share one quota">same login as ' + esc(byEmail[a.email].filter(function (l) { return l !== a.label; }).join(', ')) + '</span>' : '')
       + (urgent ? ' <span class="tag use" title="' + esc(fl + '% of the 5h window is lost at ' + fmtClock(five.resetsAt) + ' if not used') + '">use before ' + esc(fmtClock(five.resetsAt)) + '</span>' : '')
       + '</div></td>'

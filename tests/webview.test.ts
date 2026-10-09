@@ -882,6 +882,19 @@ describe('Claude panel seats', () => {
     assert.deepEqual(page.errors, []);
   });
 
+  it('shows each seat advisor state, with the reason in its tooltip', async () => {
+    const snap = snapshot([]);
+    snap.accounts[0] = { ...snap.accounts[0], advisor: { state: 'active', model: 'claude-fable-5-1', reason: null, at: T0 } } as never;
+    snap.accounts[1] = { ...snap.accounts[1], advisor: { state: 'unavailable', model: 'claude-fable-5-1', reason: 'Fable 5.1 as the advisor bills to usage credits', at: T0 } } as never;
+    const page = await runPage(renderDashboard(), async (action) => (action === 'usageHistory' ? { ok: false, error: 'x' } : structuredClone(snap)), { startAt: T0 });
+    const tag = (id: string) => page.doc.querySelectorAll(`tr[data-key=acc:${id}] .tag`).filter((t) => /advisor/.test(t.textContent))[0];
+    assert.equal(tag('a').textContent, 'advisor');
+    assert.equal(tag('b').textContent, 'no advisor');
+    assert.match(tag('b').getAttribute('title')!, /bills to usage credits/);
+    assert.equal(tag('c'), undefined, 'not seen yet: no pill');
+    assert.deepEqual(page.errors, []);
+  });
+
   it('sorts by the soonest reset when asked', async () => {
     const page = await seatsPage();
     const order = () => page.doc.querySelectorAll('#acc tr').map((t) => t.getAttribute('data-key'));
