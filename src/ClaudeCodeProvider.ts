@@ -15,6 +15,7 @@ import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample }
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
 import type { CliProcessTracker } from './agentSession/processTracker.js';
+import { isAdvisorRefusal, type AdvisorPolicy } from './accounts/advisor.js';
 import { ToolCallCutter } from './toolCallCutter.js';
 import {
   ASSISTANT_SLOT,
@@ -87,6 +88,8 @@ export type ClaudeCodeProviderOptions = {
    * one (`--resume`), sending only what is new.
    */
   crossSeat?: () => boolean;
+  /** Server-side advisor on every CLI started (accounts/advisor.ts). */
+  advisor?: AdvisorPolicy;
 };
 
 // ---------------------------------------------------------------------------
@@ -171,6 +174,8 @@ type QueryOptions = {
   pathToClaudeCodeExecutable?: string;
   canUseTool?: CanUseTool;
   extraArgs?: Record<string, string | null>;
+  /** Flag settings (`--settings`): the advisor model. */
+  settings?: { advisorModel?: string };
   /** Continue this Claude Code session (`--resume`). */
   resume?: string;
   /** With `resume`: drop the transcript entries after this one. */
@@ -527,6 +532,14 @@ export class ClaudeCodeProvider implements LLMProvider {
     try {
       yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
     } catch (err) {
+      if (err instanceof AdvisorRefused && this.opts.advisor) {
+        // Same seat, without the advisor (settingsFor now omits it): an
+        // advisor refusal is not a reason to move the conversation. Cannot
+        // loop: without the advisor there is nothing left to refuse.
+        this.opts.advisor.markIncompatible(account.id, err.message);
+        yield* this.attempt(req, model, built, account, agent, sessionKey);
+        return;
+      }
       if (!(err instanceof SessionLost)) throw err;
       this.log.warn('Claude engine session lost before any output; retrying as a one-shot request', {
         account: account.id,
@@ -600,6 +613,10 @@ export class ClaudeCodeProvider implements LLMProvider {
         effort = e;
       }
     }
+    // The server-side advisor, unless off or refused by the API on this seat.
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    if (advisorSettings) options.settings = advisorSettings;
+    const advisorModel = advisorSettings?.advisorModel;
 
     // ---- persistent session: which process, and what to send it ----------
     // Only with the native CLI: `--tools ""` guarantees a user message gets a
@@ -624,12 +641,16 @@ export class ClaudeCodeProvider implements LLMProvider {
           const delta = buildPrompt(plan.delta).content;
           content = plan.systemNote ? [{ type: 'text', text: plan.systemNote }, ...delta] : delta;
           const reusable =
-            existing && existing.accountId === account.id && existing.model === model && existing.effort === effort;
+            existing &&
+            existing.accountId === account.id &&
+            existing.model === model &&
+            existing.effort === effort &&
+            existing.advisor === advisorModel;
           if (reusable) {
             live = existing;
             sessionMode = 'continue';
           } else {
-            if (existing) sessions.close(sessionKey, 'model, effort or seat changed');
+            if (existing) sessions.close(sessionKey, 'model, effort, advisor or seat changed');
             sessionMode = 'resume';
           }
         } else {
@@ -680,7 +701,9 @@ export class ClaudeCodeProvider implements LLMProvider {
         }
       }
       const q = query({ prompt: input, options: sessionOptions }) as unknown as LiveQuery;
+      this.opts.advisor?.observe(account.id, q, advisorSettings);
       live = new LiveSession(sessionKey, account.id, model, effort, q, input as PushQueue<unknown>, sessionController);
+      live.advisor = advisorModel;
       sessions.add(live);
     }
     if (live) live.busy = true;
@@ -719,6 +742,8 @@ export class ClaudeCodeProvider implements LLMProvider {
       images: built.images,
       // What actually reaches the CLI as `--effort` (absent = CLI default).
       effort,
+      // Advisor setting the CLI got (it may still refuse it: see the seat's advisor state).
+      advisor: advisorModel ?? null,
       session: sessionMode,
       ...(planReason ? { sessionReason: planReason } : {}),
       thread: sessionKey,
@@ -734,6 +759,9 @@ export class ClaudeCodeProvider implements LLMProvider {
     let tokens: TokenSample | undefined;
     let rejectedUntil: number | null = null;
     let sdkError: string | undefined;
+    // `api_error` of a synthetic error turn (`advisor_incompatible`, ...).
+    let apiError: unknown;
+    let advisorRefused = false;
     let syntheticText = '';
     let initTools: string[] = [];
     let sessionId: string | null = null;
@@ -769,6 +797,14 @@ export class ClaudeCodeProvider implements LLMProvider {
       finishReason,
       usage: servedModel ? { ...usage, servedModel } : usage,
     });
+    // The API refused the advisor before anything was produced: the caller
+    // replays the request on this same seat without it.
+    const advisorRefusal = (detail: string): AdvisorRefused | null => {
+      if (!advisorModel || assembledContent || assembledThinking || !isAdvisorRefusal(detail, apiError)) return null;
+      advisorRefused = true;
+      failed = { outcome: 'switched', detail };
+      return new AdvisorRefused(detail);
+    };
     const fail = (detail: string): AccountFailure => {
       const c = classifyFailure(detail, sdkError, rejectedUntil);
       seatFailed = c.kind === 'limit' || c.kind === 'throttle' || c.kind === 'auth';
@@ -793,7 +829,9 @@ export class ClaudeCodeProvider implements LLMProvider {
         live.input.push(oneUser(content));
         iterator = live.iterator;
       } else {
-        iterator = query({ prompt: oneUserMessage(content), options })[Symbol.asyncIterator]();
+        const q = query({ prompt: oneUserMessage(content), options });
+        this.opts.advisor?.observe(account.id, q, advisorSettings);
+        iterator = q[Symbol.asyncIterator]();
       }
       for (;;) {
         const step = await iterator.next();
@@ -894,6 +932,7 @@ export class ClaudeCodeProvider implements LLMProvider {
           // synthetic assistant turn. That text is an error, never an answer.
           if (am.error || am.message.model === '<synthetic>') {
             sdkError = am.error ?? sdkError;
+            apiError = (am as { api_error?: unknown }).api_error ?? apiError;
             syntheticText += textOf(am.message.content);
             continue;
           }
@@ -971,6 +1010,8 @@ export class ClaudeCodeProvider implements LLMProvider {
             });
             const detail =
               syntheticText.trim() || rm.result || rm.errors?.join('; ') || rm.subtype || 'unknown error';
+            const refused = advisorRefusal(detail);
+            if (refused) throw refused;
             const failure = fail(detail);
             // Seat-level failures always surface (the caller decides whether to
             // switch). Other errors after streamed content keep the old
@@ -1032,7 +1073,7 @@ export class ClaudeCodeProvider implements LLMProvider {
         }
       }
     } catch (err) {
-      if (err instanceof AccountFailure) throw err;
+      if (err instanceof AccountFailure || err instanceof AdvisorRefused) throw err;
       if (isAbortLike(err) || controller.signal.aborted || (persistent && requestAborted)) {
         // User pressed Stop, or our own time-to-first-chunk budget fired. The
         // host contract requires exactly one `done`. A timeout that produced
@@ -1058,6 +1099,8 @@ export class ClaudeCodeProvider implements LLMProvider {
       }
       // The SDK throws on a non-zero CLI exit; its message carries the reason.
       const detail = (err instanceof Error ? err.message : String(err)) + (syntheticText ? ` ${syntheticText}` : '');
+      const refused = advisorRefusal(detail);
+      if (refused) throw refused;
       const failure = fail(detail);
       if (persistent && !failure.switchable && assembledContent.length === 0 && !assembledThinking) {
         // The session's process went away (crash, killed, bad resume): the
@@ -1080,7 +1123,11 @@ export class ClaudeCodeProvider implements LLMProvider {
       }
       if (live && sessions && record) {
         const userStopped = requestAborted && deadline.userAborted;
-        if (failed && seatFailed && persistent && record.sessionId && (this.opts.crossSeat?.() ?? false)) {
+        if (advisorRefused) {
+          // The process goes (it was launched with the advisor), the session
+          // stays: the replay without the advisor resumes it at the last reply.
+          sessions.close(live.key, 'advisor refused by the API');
+        } else if (failed && seatFailed && persistent && record.sessionId && (this.opts.crossSeat?.() ?? false)) {
           // The seat is out, not the session: the next seat resumes it at the
           // last reply Alfred kept and sends this request's delta again.
           sessions.close(live.key, `seat failed: ${failed.detail.slice(0, 120)}`);
@@ -1219,6 +1266,14 @@ export class ClaudeCodeProvider implements LLMProvider {
   /** Close every live engine session (plugin deactivation). */
   dispose(): void {
     this.sessions?.dispose();
+  }
+}
+
+/** The API refused the advisor (`advisor_incompatible`) before anything was produced. */
+class AdvisorRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdvisorRefused';
   }
 }
 

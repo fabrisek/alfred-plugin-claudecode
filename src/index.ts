@@ -38,6 +38,16 @@ import {
 } from './agentSession/ClaudeSessionAdapter.js';
 import { ClaudeCodeSessionProvider } from './agentSession/ClaudeSessionProvider.js';
 import { CliProcessTracker } from './agentSession/processTracker.js';
+import { AdvisorPolicy } from './accounts/advisor.js';
+
+/** Advisor of every Claude session Alfred starts; empty in the settings = off. */
+export const DEFAULT_ADVISOR_MODEL = 'fable';
+
+function resolveAdvisorModel(raw: Record<string, unknown>): string {
+  // Absent = the default; an explicitly empty value turns the advisor off.
+  if (raw.advisorModel === undefined || raw.advisorModel === null) return DEFAULT_ADVISOR_MODEL;
+  return String(raw.advisorModel).trim();
+}
 
 function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
   const ctx =
@@ -274,6 +284,8 @@ const plugin: AlfredPlugin = {
     };
     shareSeats();
     const sessionIndex = new SessionIndex(join(ctx.dataDir, 'sessions.json'));
+    // Server-side advisor on every CLI this plugin starts (accounts/advisor.ts).
+    const advisor = new AdvisorPolicy(resolveAdvisorModel(ctx.config), ctx.logger);
 
     const providerOpts = {
       config: cfg,
@@ -286,6 +298,7 @@ const plugin: AlfredPlugin = {
       tracker,
       // A seat that runs out hands the same session to the next one.
       crossSeat: () => crossSeat,
+      advisor,
     };
     let provider: ClaudeCodeProvider;
     if (chatCfg.cliMode) {
@@ -298,6 +311,7 @@ const plugin: AlfredPlugin = {
         crossSeat: () => crossSeat,
         onAccountUsed: (id) => usage.soon(id),
         tracker,
+        advisor,
       });
       adapterRef = adapter;
       provider = new ClaudeCodeSessionProvider(providerOpts, adapter, sessionCapabilities(chatCfg, crossSeat));
@@ -322,6 +336,7 @@ const plugin: AlfredPlugin = {
       logger: ctx.logger,
       onAccountUsed: (id) => usage.soon(id),
       tracker,
+      advisor,
     });
     runnerRef = runner;
     registerSessionTools(ctx, runner);
@@ -351,7 +366,7 @@ const plugin: AlfredPlugin = {
           .list()
           .map((r) => runItem(r, now))
           .filter((r): r is ActivityItem => r !== undefined);
-        return { ...snapshot(pool, cli), next: pool.nextPick(firstModel(cfg.modelsRaw)), activity: activity.view(runs) };
+        return { ...snapshot(pool, cli, advisor), next: pool.nextPick(firstModel(cfg.modelsRaw)), activity: activity.view(runs) };
       }),
     );
 
@@ -561,6 +576,7 @@ const plugin: AlfredPlugin = {
       accounts: pool.list().length,
       cli: cli.source,
       strategy: pool.settings.strategy,
+      advisor: advisor.model || 'off',
     });
   },
 
@@ -592,7 +608,7 @@ function addTally(into: Tally, t: Tally): void {
 }
 
 /** Everything the dashboard shows. No secrets: tokens and credential paths stay here. */
-function snapshot(pool: AccountPool, cli: CliInfo): Record<string, unknown> {
+function snapshot(pool: AccountPool, cli: CliInfo, advisor?: AdvisorPolicy): Record<string, unknown> {
   const now = Date.now();
   const list = pool.list();
   const lastServed = pool.recent.find((r) => r.outcome === 'ok')?.accountId;
@@ -628,11 +644,16 @@ function snapshot(pool: AccountPool, cli: CliInfo): Record<string, unknown> {
       orgName: rt.orgName ?? null,
       subscriptionType: rt.subscriptionType ?? null,
       tokens,
+      // What the CLI does with the advisor on this seat, once a CLI ran there
+      // (null = not seen yet, or the advisor is off).
+      advisor: advisor?.enabled ? advisor.view(a.id) : null,
     };
   });
   const labels = new Map(list.map((a) => [a.id, a.label]));
   return {
     settings: pool.settings,
+    // Configured advisor model ('' = off); per seat: accounts[].advisor.
+    advisorModel: advisor?.model ?? '',
     cli: cli.path ? `CLI: ${cli.source}` : 'CLI: bundled (no live usage)',
     accounts,
     totals,

@@ -225,6 +225,8 @@ export class LiveSession {
   lastUsed = Date.now();
   /** `total_cost_usd` the CLI reported so far (cumulative per process). */
   costSoFar = 0;
+  /** Advisor model the process was launched with (accounts/advisor.ts); undefined = none. */
+  advisor: string | undefined;
   readonly iterator: AsyncIterator<unknown>;
   idleTimer: ReturnType<typeof setTimeout> | null = null;
 

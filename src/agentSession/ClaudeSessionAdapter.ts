@@ -24,6 +24,7 @@ import type {
 } from '@alfred/sdk';
 import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from '../accounts/pool.js';
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
+import { isAdvisorRefusal, type AdvisorPolicy } from '../accounts/advisor.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery, splitModel } from '../ClaudeCodeProvider.js';
 import { seatForResume, SESSION_ID_RE, type SessionIndex } from '../session/sessions.js';
@@ -57,6 +58,8 @@ const STDERR_TAIL = 2_000;
 
 /** Sent on the next seat when a limit cut a turn after it had produced output. */
 export const CONTINUE_DIRECTIVE = '(Usage limit reached on the previous account; continue where you stopped.)';
+/** Sent when the API refused the advisor after the CLI had taken the turn's input. */
+export const ADVISOR_RETRY_DIRECTIVE = '(The previous request failed before any answer; answer the message above.)';
 
 export type ChatSessionConfig = {
   /** Default when the conversation has none (plan §5.4: bypassPermissions). */
@@ -198,7 +201,9 @@ type AttemptResult =
       sawOutput: boolean;
       unechoed: Pending[];
       usage?: SessionUsage;
-    };
+    }
+  /** The API refused the advisor before any output: replay on the same seat without it. */
+  | { kind: 'advisor'; detail: string; unechoed: Pending[]; usage?: SessionUsage };
 
 export type ClaudeSessionAdapterOptions = {
   pool: AccountPool;
@@ -214,6 +219,8 @@ export type ClaudeSessionAdapterOptions = {
   heartbeatMs?: number;
   /** Records every CLI process, so a crashed gateway's orphans are killed on the next start. */
   tracker?: CliProcessTracker;
+  /** Server-side advisor on every CLI started (accounts/advisor.ts). */
+  advisor?: AdvisorPolicy;
 };
 
 /** Longest argv value logged as is; longer ones (prompts, JSON) are cut. */
@@ -376,6 +383,14 @@ export class ClaudeSessionAdapter {
       const r = await this.attempt({ req, turn, account, mapper, emit, model, cwd, sessionId, newId: sessionId ? undefined : newId, toSend });
       usage = addUsage(usage, r.usage);
       if (mapper.sessionId) sessionId = mapper.sessionId;
+      if (r.kind === 'advisor') {
+        // Same seat, without the advisor: settingsFor omits it from now on,
+        // so this cannot come back.
+        this.opts.advisor?.markIncompatible(account.id, r.detail);
+        toSend = [...r.unechoed, ...turn.carry.splice(0)];
+        if (toSend.length === 0) toSend = [{ uuid: randomUUID(), input: { clientMessageId: '', text: ADVISOR_RETRY_DIRECTIVE } }];
+        continue;
+      }
       if (r.kind === 'end') {
         if (usage) emit({ type: 'usage', scope: 'turn', usage });
         emit({ ...r.end, usage });
@@ -485,6 +500,9 @@ export class ClaudeSessionAdapter {
     // No thinking mode chosen = `high`, as engine turns: never the CLI's own default.
     const effort = req.effort ?? 'high';
     if (EFFORT_LEVELS.includes(effort) && cli.native) options.effort = effort;
+    // The server-side advisor, unless off or refused by the API on this seat.
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    if (advisorSettings) options.settings = advisorSettings;
     const mcp = req.mcpServers ?? [];
     if (mcp.length) {
       options.mcpServers = Object.fromEntries(
@@ -523,17 +541,27 @@ export class ClaudeSessionAdapter {
     let completed = false;
     let sawOutput = false;
     let sdkError: string | undefined;
+    let apiError: unknown;
     let syntheticText = '';
     let rejectedUntil: number | null = null;
     let thrown: string | undefined;
 
     pool.begin(account.id);
-    logger.info('claude session turn', { turnId: req.turnId, account: account.id, model, mode, resume: a.sessionId ?? null, cwd });
+    logger.info('claude session turn', {
+      turnId: req.turnId,
+      account: account.id,
+      model,
+      mode,
+      resume: a.sessionId ?? null,
+      cwd,
+      advisor: advisorSettings?.advisorModel ?? null,
+    });
     try {
       const q = query({ prompt: input as never, options: options as never }) as AsyncIterable<unknown> & {
         interrupt(): Promise<unknown>;
       };
       turn.query = q;
+      this.opts.advisor?.observe(account.id, q, advisorSettings);
       for await (const raw of q) {
         const m = raw as Record<string, unknown> & { type?: string; subtype?: string };
         if (m.type === 'system' && m.subtype === 'init') {
@@ -553,6 +581,7 @@ export class ClaudeSessionAdapter {
           const msg = (m.message ?? {}) as { model?: string; content?: Array<Record<string, unknown>> };
           if (m.error || msg.model === '<synthetic>') {
             sdkError = (m.error as string | undefined) ?? sdkError;
+            apiError = m.api_error ?? apiError;
             syntheticText += (msg.content ?? []).filter((b) => b.type === 'text').map((b) => String(b.text ?? '')).join('');
           } else sawOutput = true;
         } else if (m.type === 'user' && m.isReplay === true) {
@@ -635,7 +664,10 @@ export class ClaudeSessionAdapter {
           (stderrTail ? `CLI exited without a result. stderr: ${stderrTail.trim().slice(-400)}` : 'the CLI exited without a result');
         detail = why;
         const c = classifyFailure(why, sdkError, rejectedUntil);
-        if (c.kind === 'limit') {
+        if (advisorSettings && !sawOutput && isAdvisorRefusal(why, apiError)) {
+          out = { kind: 'advisor', detail: why, unechoed, usage };
+          outcome = 'switched';
+        } else if (c.kind === 'limit') {
           const until = c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? this.now() + 30 * 60_000;
           pool.markExhausted(account.id, until, why.slice(0, 200));
           out = { kind: 'seat', failure: { kind: 'limit', message: why, resetsAt: until }, sawOutput, unechoed, usage };

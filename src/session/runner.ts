@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import type { Logger } from '@alfred/sdk';
 import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from '../accounts/pool.js';
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
+import { isAdvisorRefusal, type AdvisorPolicy } from '../accounts/advisor.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
 import { classifyFailure, loadQuery } from '../ClaudeCodeProvider.js';
 import type { CliProcessTracker } from '../agentSession/processTracker.js';
@@ -116,6 +117,8 @@ type AttemptOutcome = {
   denials: string[];
   /** Seat-level failure (limit / auth) before the session produced anything: try another seat. */
   switchable: boolean;
+  /** The API refused the advisor before any output: run again on the same seat without it. */
+  advisorRefused?: boolean;
 };
 
 const KEEP_FINISHED_MS = 2 * 3_600_000;
@@ -146,6 +149,8 @@ export type SessionRunnerOptions = {
   now?: () => number;
   /** Records every CLI process, so a crashed gateway's orphans are killed on the next start. */
   tracker?: CliProcessTracker;
+  /** Server-side advisor on every CLI started (accounts/advisor.ts). */
+  advisor?: AdvisorPolicy;
 };
 
 export class SessionRunner {
@@ -286,6 +291,11 @@ export class SessionRunner {
         tried.add(account.id);
         run.account = account;
         outcome = await this.attempt(run, account);
+        if (outcome.advisorRefused && !run.cancelled && !run.timedOut) {
+          // Same seat, without the advisor (settingsFor omits it from now on).
+          this.opts.advisor?.markIncompatible(account.id, outcome.error ?? 'advisor refused');
+          outcome = await this.attempt(run, account);
+        }
         if (!outcome.switchable || run.request.sessionId || run.cancelled || run.timedOut) break;
         run.switchedFrom.push(`${account.label}: ${outcome.error ?? 'failed'}`);
         logger.warn('session switching Claude account', { run: run.id, from: account.id });
@@ -383,6 +393,9 @@ export class SessionRunner {
     if (req.sessionId) options.resume = req.sessionId;
     if (cli.path) options.pathToClaudeCodeExecutable = cli.path;
     if (cli.native && req.effort) options.extraArgs = { effort: req.effort };
+    // The server-side advisor, unless off or refused by the API on this seat.
+    const advisorSettings = this.opts.advisor?.settingsFor(account.id);
+    if (advisorSettings) options.settings = advisorSettings;
     if (this.opts.tracker) {
       // Own spawn: the SDK then forwards no stderr, so the tracker does.
       options.spawnClaudeCodeProcess = this.opts.tracker.spawner((data) => {
@@ -393,6 +406,7 @@ export class SessionRunner {
     let tokens: TokenSample | undefined;
     let rejectedUntil: number | null = null;
     let sdkError: string | undefined;
+    let apiError: unknown;
     let syntheticText = '';
     let sawOutput = false;
     let result: Msg | undefined;
@@ -401,7 +415,9 @@ export class SessionRunner {
     pool.begin(account.id);
     this.emit(run, { phase: `starting on ${account.label}`, data: this.progressData(run) });
     try {
-      for await (const raw of query({ prompt: oneUserMessage(req.prompt) as never, options: options as never })) {
+      const q = query({ prompt: oneUserMessage(req.prompt) as never, options: options as never });
+      this.opts.advisor?.observe(account.id, q, advisorSettings);
+      for await (const raw of q as AsyncIterable<unknown>) {
         const m = raw as Msg;
         if (m.type === 'system' && m.subtype === 'init') {
           clearTimeout(startTimer);
@@ -419,6 +435,7 @@ export class SessionRunner {
           const msg = (m.message ?? {}) as { content?: unknown; model?: string };
           if (m.error || msg.model === '<synthetic>') {
             sdkError = (m.error as string | undefined) ?? sdkError;
+            apiError = m.api_error ?? apiError;
             syntheticText += textBlocks(msg.content);
             continue;
           }
@@ -511,6 +528,7 @@ export class SessionRunner {
           tokens,
           denials,
           switchable: seatLevel && !sawOutput,
+          advisorRefused: !!advisorSettings && !sawOutput && isAdvisorRefusal(detail, apiError),
         };
       }
     }

@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
@@ -89,6 +89,13 @@
         "label": "Switch seat mid-turn",
         "description": "When a seat hits its usage limit in the middle of a turn, continue the same session on the next seat instead of stopping.",
         "default": true,
+        "group": "Chat"
+      },
+      "advisorModel": {
+        "type": "string",
+        "label": "Advisor model",
+        "description": "Server-side advisor of every Claude session Alfred starts (conversations, sub-agents, claude_code_run): the model consults it on its own, the advisor sees the whole conversation. Alias or id (fable, opus). Empty = no advisor. A seat that may not use it (Fable as advisor needs usage credits enabled and accepted on that seat with /model fable) runs without it. Needs a plugin reload.",
+        "default": "fable",
         "group": "Chat"
       },
       "sharedSessionStore": {
