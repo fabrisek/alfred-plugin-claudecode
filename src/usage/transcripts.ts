@@ -46,7 +46,9 @@ export function agentOfCwd(cwd: string | undefined): string {
 }
 
 /** The usage vector of one transcript line, or null when it carries none. */
-export function parseLine(line: string): { id: string; at: number; model: string; cwd?: string; v: Vec; ttlKnown: boolean } | null {
+export type ParsedLine = { id: string; at: number; model: string; cwd?: string; v: Vec; ttlKnown: boolean; advisor: Array<{ model: string; v: Vec }> };
+
+export function parseLine(line: string): ParsedLine | null {
   if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
   let j: {
     type?: string;
@@ -62,6 +64,7 @@ export function parseLine(line: string): { id: string; at: number; model: string
         cache_read_input_tokens?: number;
         cache_creation_input_tokens?: number;
         cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
+        iterations?: Array<{ type?: string; model?: string; input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } }>;
       };
     };
   };
@@ -87,7 +90,19 @@ export function parseLine(line: string): { id: string; at: number; model: string
   }
   const v: Vec = [1, n(u.input_tokens), w5, w1, n(u.cache_read_input_tokens), n(u.output_tokens)];
   if (v[1] + v[2] + v[3] + v[4] + v[5] === 0) return null;
-  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v, ttlKnown: !!u.cache_creation || write === 0 };
+  // Advisor calls (Fable advising the model): `usage.iterations` entries of
+  // another type, with their own model. The top-level usage is the sum of the
+  // "message" iterations only (checked on real transcripts, 2026-10-09), so
+  // they are added, at their own model's price, never twice.
+  const advisor: ParsedLine['advisor'] = [];
+  for (const it of u.iterations ?? []) {
+    if (!it || it.type === 'message' || !it.model) continue;
+    const cw = n(it.cache_creation_input_tokens);
+    const a1 = it.cache_creation ? Math.min(cw || Infinity, n(it.cache_creation.ephemeral_1h_input_tokens)) : 0;
+    const av: Vec = [0, n(it.input_tokens), Math.max(0, cw - (Number.isFinite(a1) ? a1 : 0)), Number.isFinite(a1) ? a1 : 0, n(it.cache_read_input_tokens), n(it.output_tokens)];
+    if (av[1] + av[2] + av[3] + av[4] + av[5] > 0) advisor.push({ model: it.model, v: av });
+  }
+  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v, ttlKnown: !!u.cache_creation || write === 0, advisor };
 }
 
 /** Message ids remembered per file: a response is written once per content block. */
@@ -404,6 +419,15 @@ export class TranscriptScanner {
       // A length-priced model is stored per price band (usage/pricing.ts).
       const model = pricedModel(p.model, p.v[1] + p.v[2] + p.v[3] + p.v[4]);
       this.opts.store.add(p.at, account, model, agentOfCwd(p.cwd), v);
+      // Advisor iterations, once per response (their growth on a repeated line).
+      p.advisor.forEach((ad, k) => {
+        const key = `${p.id}#adv${k}`;
+        const before = ids[key];
+        const g: Vec = [0, 0, 0, 0, 0, 0];
+        for (let i = 0; i < 5; i++) g[i + 1] = Math.max(0, ad.v[i + 1] - (before ? before[i] : 0));
+        ids[key] = [ad.v[1], ad.v[2], ad.v[3], ad.v[4], ad.v[5]];
+        if (g[1] + g[2] + g[3] + g[4] + g[5] > 0) this.opts.store.add(p.at, account, `${ad.model}@advisor`, agentOfCwd(p.cwd), g);
+      });
     }
   }
 }

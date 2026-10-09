@@ -100,3 +100,32 @@ describe('pricing on the real history', { skip: !existsSync(STATE) && 'no state/
     assert.ok(Math.abs(listed - byModel) <= view.models.length * 0.005 + 1e-6, `models list ${listed} vs ${byModel}`);
   });
 });
+
+describe('advisor iterations (Fable advising the model)', () => {
+  // A real response with the advisor on (2026-10-09): the top-level usage is the
+  // sum of the two "message" iterations; the advisor iteration comes on top.
+  const usage = {
+    input_tokens: 4, cache_creation_input_tokens: 13589, cache_read_input_tokens: 19630, output_tokens: 30,
+    cache_creation: { ephemeral_5m_input_tokens: 255, ephemeral_1h_input_tokens: 13334 },
+    iterations: [
+      { input_tokens: 2, output_tokens: 26, cache_read_input_tokens: 3148, cache_creation_input_tokens: 13334, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 13334 }, type: 'message' },
+      { input_tokens: 18062, output_tokens: 310, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 }, type: 'advisor_message', model: 'claude-fable-5-1' },
+      { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 16482, cache_creation_input_tokens: 255, cache_creation: { ephemeral_5m_input_tokens: 255, ephemeral_1h_input_tokens: 0 }, type: 'message' },
+    ],
+  };
+  const raw = JSON.stringify({ type: 'assistant', timestamp: '2026-10-09T02:51:20Z', message: { id: 'adv', model: 'claude-opus-5-5', usage } });
+
+  it('counts the advisor once, at the Fable 5.1 price, on top of the top-level usage', () => {
+    const p = parseLine(raw)!;
+    assert.deepEqual(p.v, [1, 4, 255, 13334, 19630, 30], 'top level = the message iterations');
+    assert.deepEqual(p.advisor, [{ model: 'claude-fable-5-1', v: [0, 18062, 0, 0, 0, 310] }]);
+    const fable = costOf(p.advisor[0].model + '@advisor', p.advisor[0].v);
+    assert.ok(Math.abs(fable - (18062 * 10 + 310 * 50) / 1e6) < 1e-12, 'Fable 5.1: $10 in, $50 out');
+    const opus = costOf('claude-opus-5-5', p.v);
+    assert.ok(Math.abs(opus - (4 * 4 + 255 * 5 + 13334 * 8 + 19630 * 0.2 + 30 * 20) / 1e6) < 1e-12);
+  });
+
+  it('a response without iterations has no advisor part', () => {
+    assert.deepEqual(parseLine(line(REAL[0]))!.advisor, []);
+  });
+});

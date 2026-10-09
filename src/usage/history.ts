@@ -73,9 +73,10 @@ function dayStart(day: string): number {
  * 0 input, 1 cache write (5m + 1h), 2 cache read, 3 output (tokens);
  * 4..7 the API-equivalent USD of the same four; 8 requests;
  * 9 USD the cache reads would have cost as plain input; 10 USD the cache
- * writes would have cost as plain input; 11 cache write 1h tokens; 12 its USD.
+ * writes would have cost as plain input; 11 cache write 1h tokens; 12 its USD;
+ * 13 advisor tokens (Fable advising, already in 0..3), 14 their USD (already in 4..7).
  */
-export const CELL_LEN = 13;
+export const CELL_LEN = 15;
 
 export function addCell(model: string, v: Vec, into: number[]): void {
   const { price: q } = priceOf(model);
@@ -92,6 +93,10 @@ export function addCell(model: string, v: Vec, into: number[]): void {
   into[10] += ((v[2] + v[3]) * q.input) / 1e6;
   into[11] += v[3];
   into[12] += (v[3] * q.write1h) / 1e6;
+  if (model.endsWith('@advisor')) {
+    into[13] += v[1] + v[2] + v[3] + v[4] + v[5];
+    into[14] += (v[1] * q.input + v[2] * q.write5m + v[3] * q.write1h + v[4] * q.cacheRead + v[5] * q.output) / 1e6;
+  }
 }
 
 export type UsageView = {
@@ -372,7 +377,7 @@ export class UsageStore {
 
     const round = (rows: Record<string, number[][]>): void => {
       for (const list of Object.values(rows)) {
-        for (const c of list) for (const j of [4, 5, 6, 7, 9, 10, 12]) c[j] = Math.round(c[j] * 1e5) / 1e5;
+        for (const c of list) for (const j of [4, 5, 6, 7, 9, 10, 12, 14]) c[j] = Math.round(c[j] * 1e5) / 1e5;
       }
     };
     round(daily);

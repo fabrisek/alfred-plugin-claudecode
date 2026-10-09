@@ -25,8 +25,9 @@ export const USAGE_SCAN_EVERY_MS = 60_000;
  * 3: every response attributed to the login its transcript reports.
  * 4: cache writes without a TTL split priced at the TTL the seat writes with (1h);
  *    models without a list price no longer priced as Opus.
+ * 5: advisor iterations (Fable advising) counted at their own model's price.
  */
-export const USAGE_ATTRIBUTION_REV = 4;
+export const USAGE_ATTRIBUTION_REV = 5;
 
 export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sessions: SessionIndex): { stop(): void } {
   const store = new UsageStore(join(ctx.dataDir, 'usage-history.json'), Date.now, USAGE_ATTRIBUTION_REV);

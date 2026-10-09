@@ -1026,7 +1026,7 @@ function weekOf(d) {
   dt.setDate(dt.getDate() - (dt.getDay() + 6) % 7);
   return dayKey(dt);
 }
-var CELL = 13;
+var CELL = 15;
 function blankCell() { var c = []; for (var i = 0; i < CELL; i++) c.push(0); return c; }
 function addCell(a, b) { for (var i = 0; i < CELL; i++) a[i] += (b && b[i]) || 0; return a; }
 // Cell: 0-3 tokens (input, cache write, cache read, output), 4-7 their API-equiv USD, 8 requests,
@@ -1046,6 +1046,7 @@ function cellLines(head, c) {
   var lines = [head].concat(breakdownLines([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]]));
   var n = cacheNet(c);
   lines.push('Cache: ' + (n.net >= 0 ? 'saved ' : 'cost ') + fmtUsd(Math.abs(n.net)) + ' net (reads saved ' + fmtUsd(n.saved) + ', write premium ' + fmtUsd(n.premium) + ')');
+  if (c[13] > 0) lines.push('of which Advisor (Fable): ' + fmtTokens(c[13]) + ' tok \\u00b7 ' + fmtUsd(c[14]));
   lines.push(c[8] + ' requests');
   return lines.join('\\n');
 }
@@ -1276,6 +1277,7 @@ function costView(c) {
       + '<span class="r"><b>' + fmtUsd(c[4 + i]) + '</b></span><span class="r muted">' + pct(c[4 + i], tu) + '</span>';
   }).join('');
   return '<div class="costs">' + rows
+    + (c[13] > 0 ? '<span title="Fable advising the model: its own tokens, at the Fable 5.1 price, already counted in the four lines above">of which Advisor (Fable)</span><span></span><span class="r">' + fmtTokens(c[13]) + '</span><span class="r">' + fmtUsd(c[14]) + '</span><span class="r muted">' + pct(c[14], tu) + '</span>' : '')
     + '<span class="sep"></span>'
     + '<span><b>Total</b></span><span></span><span class="r">' + fmtTokens(tt) + '</span><span class="r"><b>' + fmtUsd(tu) + '</b></span><span></span>'
     + '<span title="What the cache reads would have cost as plain input, minus what they cost">Cache reads saved</span><span></span><span class="r muted">r/w ' + fmtRatio(cacheRatio(c)) + '</span><span class="r pos-v">+' + fmtUsd(n.saved) + '</span><span></span>'
