@@ -94,7 +94,7 @@
       "advisorModel": {
         "type": "string",
         "label": "Advisor model",
-        "description": "Server-side advisor of the Claude sessions Alfred starts (which ones: Advisor scope): the model consults it on its own, the advisor sees the whole conversation. Alias or id (fable, opus). Empty = no advisor. A seat that may not use it (Fable as advisor needs usage credits enabled and accepted on that seat with /model fable) runs without it. Needs a plugin reload.",
+        "description": "Server-side advisor of the Claude sessions Alfred starts (which ones: Advisor scope): the model consults it on its own, the advisor sees the whole conversation. Alias or id (fable, opus). Empty = no advisor. A seat whose plan does not include it runs without it (never through extra usage or usage credits). Needs a plugin reload.",
         "default": "fable",
         "group": "Chat"
       },

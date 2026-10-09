@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { AccountPool } from '../src/accounts/pool.js';
-import { AdvisorPolicy, INCOMPATIBLE_PAUSE_MS, cliThread, engineThread, isAdvisorRefusal } from '../src/accounts/advisor.js';
+import { AdvisorPolicy, INCOMPATIBLE_PAUSE_MS, NOT_IN_PLAN, cliThread, engineThread, isAdvisorRefusal } from '../src/accounts/advisor.js';
 import { ClaudeCodeProvider, __setQueryForTests } from '../src/ClaudeCodeProvider.js';
+import { buildChildEnv } from '../src/accounts/cli.js';
 
 const logs: Array<[string, string, Record<string, unknown> | undefined]> = [];
 const logger = {
@@ -38,9 +39,10 @@ describe('advisor policy', () => {
     assert.equal(off.settingsFor('a', 'main'), undefined);
   });
 
-  it('reads what the CLI applied: active, or unavailable on a seat that refuses it, logged once', async () => {
+  it('reads what the CLI applied: active, or not in the plan of a seat (then never asked again), logged once', async () => {
     logs.length = 0;
-    const p = new AdvisorPolicy('fable', logger);
+    const file = join(dir, `not-in-plan-${Math.random().toString(36).slice(2)}.json`);
+    const p = new AdvisorPolicy('fable', logger, Date.now, 'main', file);
     const cli = (advisor: string | null) => ({ getSettings: async () => ({ applied: { model: 'claude-opus-5-5', advisor } }) });
     p.observe('premium', cli('claude-fable-5-1'), { advisorModel: 'fable' });
     p.observe('standard', cli(null), { advisorModel: 'fable' });
@@ -49,10 +51,14 @@ describe('advisor policy', () => {
     assert.equal(p.view('premium')?.state, 'active');
     assert.equal(p.view('premium')?.model, 'claude-fable-5-1');
     assert.equal(p.view('standard')?.state, 'unavailable');
-    assert.match(p.view('standard')?.reason ?? '', /usage credits/);
-    // A seat that refuses it keeps its advisor setting: nothing changes in its launches.
-    assert.deepEqual(p.settingsFor('standard', 'main'), { advisorModel: 'fable' });
-    assert.equal(logs.filter((l) => l[1].startsWith('advisor not available')).length, 1);
+    assert.equal(p.view('standard')?.reason, NOT_IN_PLAN);
+    // Never asked again on that seat, and remembered across reloads.
+    assert.equal(p.settingsFor('standard', 'main'), undefined);
+    assert.deepEqual(p.settingsFor('premium', 'main'), { advisorModel: 'fable' });
+    assert.equal(logs.filter((l) => l[1].startsWith('advisor not included in the plan')).length, 1);
+    const again = new AdvisorPolicy('fable', logger, Date.now, 'main', file);
+    assert.equal(again.settingsFor('standard', 'main'), undefined);
+    assert.equal(again.view('standard')?.reason, NOT_IN_PLAN);
   });
 
   it('a CLI without get_settings, or one that fails it, leaves the state alone', async () => {
@@ -258,5 +264,29 @@ describe('advisor scope on real launch points', () => {
     for await (const _ of adapter.runSessionTurn(turn('83d7fb69-22a8-4d3c-a740-e5d5b2c66879') as never)) void _;
     for await (const _ of adapter.runSessionTurn(turn('par-r-0178b4a1-muzvhr22') as never)) void _;
     assert.deepEqual(seen, [{ advisorModel: 'fable' }, undefined]);
+  });
+});
+
+describe('never past the plan (no extra usage)', () => {
+  it('every CLI the plugin starts has the extra-usage command and fast mode off', () => {
+    const pool = new AccountPool({ dataDir: mkdtempSync(join(dir, 'p-')), logger });
+    const seat = pool.add('Seat', 'login');
+    const env = buildChildEnv(pool, seat);
+    assert.equal(env.DISABLE_EXTRA_USAGE_COMMAND, '1');
+    assert.equal(env.CLAUDE_CODE_DISABLE_FAST_MODE, '1');
+  });
+
+  it('a seat reporting overage in use is benched until its window resets, like a rejected one', () => {
+    const pool = new AccountPool({ dataDir: mkdtempSync(join(dir, 'p-')), logger });
+    const seat = pool.add('Seat', 'token');
+    pool.setToken(seat.id, 'tok');
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    // Real shape of a plan seat's event (2026-10-09): overage rejected by the org, not in use.
+    const real = { status: 'allowed', resetsAt, rateLimitType: 'five_hour', overageStatus: 'rejected', overageDisabledReason: 'org_level_disabled', isUsingOverage: false, unifiedWindows: { five_hour: { utilization: 0.03, resetsAt } } };
+    assert.equal(pool.applyRateLimit(seat.id, real), null);
+    assert.equal(pool.unavailableReason(seat), null);
+    const overage = { ...real, overageStatus: 'allowed', isUsingOverage: true };
+    assert.equal(pool.applyRateLimit(seat.id, overage), resetsAt * 1000);
+    assert.notEqual(pool.unavailableReason(seat), null);
   });
 });

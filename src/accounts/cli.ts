@@ -80,8 +80,22 @@ export function buildChildEnv(pool: AccountPool, account: Account): Record<strin
   if (account.configDir) env.CLAUDE_CONFIG_DIR = account.configDir;
   const token = pool.tokenFor(account);
   if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  Object.assign(env, NO_EXTRA_USAGE_ENV);
   return env;
 }
+
+/**
+ * Never past a plan's limit (user rule): every CLI this plugin starts has
+ * the client-side doors to extra usage closed. `/usage-credits` (ex
+ * `/extra-usage`: set up or request usage credits) is disabled, and fast
+ * mode, which can bill to extra usage, is off. The organization's own
+ * setting (extra usage disabled) stays the real barrier; a seat that still
+ * reports overage in use is benched (pool.applyRateLimit).
+ */
+export const NO_EXTRA_USAGE_ENV: Readonly<Record<string, string>> = {
+  DISABLE_EXTRA_USAGE_COMMAND: '1',
+  CLAUDE_CODE_DISABLE_FAST_MODE: '1',
+};
 
 /**
  * Open a visible console running the interactive CLI for this seat, so the

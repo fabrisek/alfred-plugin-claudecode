@@ -477,6 +477,15 @@ export class AccountPool {
       this.markExhausted(id, until, `rate limit rejected (${info.rateLimitType ?? 'unknown window'})`);
       return until;
     }
+    // Never past the plan's limit: a seat drawing on overage (extra usage,
+    // usage credits) is out, exactly as if its window were rejected.
+    const extra = info as { isUsingOverage?: unknown; overageInUse?: unknown };
+    if (extra.isUsingOverage === true || extra.overageInUse === true) {
+      const until = typeof info.resetsAt === 'number' ? info.resetsAt * 1000 : this.now() + 30 * 60_000;
+      this.opts.logger.error('seat drawing on extra usage: benched until its plan window resets', { account: id, until: new Date(until).toISOString() });
+      this.markExhausted(id, until, `plan limit reached (${info.rateLimitType ?? 'unknown window'}); extra usage is never used`);
+      return until;
+    }
     return null;
   }
 

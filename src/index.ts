@@ -291,6 +291,8 @@ const plugin: AlfredPlugin = {
       ctx.logger,
       Date.now,
       isAdvisorScope(ctx.config.advisorScope) ? ctx.config.advisorScope : 'main',
+      // Seats whose plan does not include it, remembered across reloads.
+      join(ctx.dataDir, 'advisor-not-in-plan.json'),
     );
 
     const providerOpts = {
