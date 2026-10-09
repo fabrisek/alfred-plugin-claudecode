@@ -23,8 +23,10 @@ export const USAGE_SCAN_EVERY_MS = 60_000;
  * apart better: the next start rebuilds the history from the transcripts.
  * 2: engine-mode sessions attributed through state/engine-sessions.
  * 3: every response attributed to the login its transcript reports.
+ * 4: cache writes without a TTL split priced at the TTL the seat writes with (1h);
+ *    models without a list price no longer priced as Opus.
  */
-export const USAGE_ATTRIBUTION_REV = 3;
+export const USAGE_ATTRIBUTION_REV = 4;
 
 export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sessions: SessionIndex): { stop(): void } {
   const store = new UsageStore(join(ctx.dataDir, 'usage-history.json'), Date.now, USAGE_ATTRIBUTION_REV);

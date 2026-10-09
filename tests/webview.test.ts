@@ -685,7 +685,7 @@ describe('Claude panel usage zone', () => {
     assert.equal(hits(page), 24);
     assert.match(page.$('useLegend')!.textContent, /Input.*Cache write.*Cache read.*Output/);
     await page.click(btn(page, 'uview', 'daily'));
-    assert.equal(hits(page), 7);
+    assert.equal(hits(page), 2, 'since the first day with data: yesterday and today');
     await page.click(btn(page, 'uview', 'cost'));
     const cost = page.$('useChart')!.textContent.replace(/\s+/g, ' ');
     assert.match(cost, /Cache write \(5m [^)]+ · 1h 60\.0k\)/);
@@ -733,7 +733,7 @@ describe('Claude panel usage zone', () => {
     assert.match(legend, /2 resets · 45% used on average · lost ≈ \$3\.0 \/ 1\.5k tok/);
     assert.match(legend, /estimate/);
     assert.match(page.$('useScope')!.textContent, /5h windows · estimate/);
-    assert.equal(hits(page), 7);
+    assert.equal(hits(page), 1, 'from the first day with a reset');
     await page.click(btn(page, 'ucap', 'seven_day'));
     assert.match(page.$('useChart')!.textContent, /No weekly reset seen in this period yet/);
     await page.click(btn(page, 'tab', 'seats'));
@@ -764,6 +764,43 @@ describe('Claude panel usage zone', () => {
     const svg = page.$('useChart')!.firstElementChild!;
     assert.equal(svg.getAttribute('width'), '480');
     assert.equal(svg.getAttribute('height'), '260');
+    assert.deepEqual(page.errors, []);
+  });
+
+  it('fills its box and scales to the tallest bar, at every panel size', async () => {
+    const { page } = await usagePage();
+    const box = page.$('useChart')! as unknown as { clientWidth: number; clientHeight: number };
+    const { DomEvent } = await import('./miniDom.js');
+    // The chart box at a 900x700, 1200x800 and 1700x930 panel (tab minus top bar, strip, legend).
+    for (const [w, h] of [[870, 560], [1170, 660], [1670, 790]]) {
+      box.clientWidth = w;
+      box.clientHeight = h;
+      page.doc.body.dispatchEvent(new DomEvent('resize'));
+      await page.advance(200);
+      for (const metric of ['cost', 'tokens']) {
+        await page.click(btn(page, 'umetric', metric));
+        for (const v of ['overview', 'hourly', 'daily']) {
+          await page.click(btn(page, 'uview', v));
+          const svg = page.doc.querySelector('#useChart svg')!;
+          assert.equal(Number(svg.getAttribute('height')), h, `${w}x${h} ${v}: the chart takes the box height`);
+          assert.equal(Number(svg.getAttribute('width')), w);
+          const plotH = h - 5 - 15;
+          let tallest = 0;
+          for (const g of page.doc.querySelectorAll('#useChart g.col')) {
+            const rects = g.querySelectorAll('rect').filter((r) => r.getAttribute('class') !== 'hit');
+            if (!rects.length) continue;
+            const top = Math.min(...rects.map((r) => Number(r.getAttribute('y'))));
+            tallest = Math.max(tallest, h - 15 - top);
+          }
+          assert.ok(tallest >= 0.85 * plotH, `${w}x${h} ${metric}/${v}: tallest bar ${tallest} of ${plotH}`);
+          assert.ok(tallest <= plotH + 0.5);
+        }
+      }
+    }
+    // Hours read with their day at midnight and on the first column.
+    await page.click(btn(page, 'uview', 'hourly'));
+    const labels = page.doc.querySelectorAll('#useChart text.ax').map((t) => t.textContent).filter((t) => /h$/.test(t));
+    assert.match(labels[0], /\d+ \S+ \d\dh|\S+ \d+ \d\dh/, 'the first hour label carries its day');
     assert.deepEqual(page.errors, []);
   });
 });

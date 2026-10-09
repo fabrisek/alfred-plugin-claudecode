@@ -179,7 +179,7 @@ svg.chart { display: block; }
 .chart .grid { stroke: var(--border); stroke-width: 1; }
 .chart .ax { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .chart .hit { fill: transparent; }
-.chart .col:hover .hit { fill: var(--panel-2); }
+.chart .col:hover rect:not(.hit) { opacity: .75; }
 .strip { display: flex; gap: 12px; align-items: baseline; padding: 4px 12px; border-bottom: 1px solid var(--border);
   font-size: 12px; white-space: nowrap; overflow: hidden; flex: none; }
 .strip .it { font-variant-numeric: tabular-nums; }
@@ -189,7 +189,7 @@ svg.chart { display: block; }
 .strip .parts b { color: var(--text); font-weight: 500; }
 .ub { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding: 8px 12px; gap: 6px; }
 /* Bounded: the strip, the chart and its legend fit the panel without a scroll. */
-.uchart { flex: none; height: clamp(140px, calc(100vh - 230px), 380px); min-width: 0; overflow: hidden; }
+.uchart { flex: 1; min-height: 160px; min-width: 0; overflow: hidden; }
 .capnote { color: var(--muted); font-size: 12px; padding: 24px 0; text-align: center; }
 .cu { fill: var(--s1); background: var(--s1); }
 .cl { fill: var(--sunk); background: var(--sunk); }
@@ -452,7 +452,8 @@ function turnTitle(a) {
 }
 
 function costCell(a) {
-  if (!a.cost || !a.tokens) return '';
+  if (!a.tokens) return '';
+  if (!a.cost) return '<span class="muted" title="' + esc('No list price for ' + (a.servedModel || a.model || 'this model')) + '">unpriced</span>';
   var usd = a.cost[0] + a.cost[1] + a.cost[2] + a.cost[3];
   var lines = [shortModel(a.servedModel || a.model) + ' at API list price'].concat(breakdownLines(a.tokens, a.cost));
   if (a.costApprox) lines.push('Uncached prompt counted as cache write.');
@@ -552,6 +553,14 @@ function meter(w, threshold, mode, label, hideReset) {
 }
 
 function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+
+// This month's API-equivalent value of one seat.
+function monthOf(id) {
+  var t = 0;
+  if (!usage || !usage.daily || !usage.daily[id]) return 0;
+  usage.days.forEach(function (d, i) { if (d >= usage.monthStart) t += usdOf(usage.daily[id][i]); });
+  return t;
+}
 
 function todayOf(id) {
   if (!usage || !usage.daily || !usage.daily[id] || !usage.days || !usage.days.length) return null;
@@ -741,7 +750,7 @@ var usage = null;
 var usageTimer = 0;
 var usagePolling = false;
 var uSel = 'all';
-var uMetric = 'tokens';
+var uMetric = 'cost';
 var uView = 'overview';
 var uHours = 24;
 // 0 = since the first day with data (at least 7 days).
@@ -847,7 +856,7 @@ function periodDays(u) {
   var n = uDays > 0 ? uDays : Math.max(u.days.length, 7);
   var days = u.days.slice(-n);
   var pad = 0;
-  while (days.length < n) {
+  while (uDays > 0 && days.length < n) {
     var first = dayDate(days[0] || dayKey(new Date()));
     first.setDate(first.getDate() - 1);
     days.unshift(dayKey(first));
@@ -877,12 +886,19 @@ function grouped(days, rows) {
   return { labels: labels, rows: out, weekly: true };
 }
 
-// Top of the axis: the next round value (1, 2, 2.5 or 5 x 10^n) above the tallest bar.
-function niceMax(v) {
+// Gridline step: the smallest 1, 2, 2.5 or 5 x 10^n giving at most "lines" lines up to v.
+function niceStep(v, lines) {
   if (!(v > 0) || !Number.isFinite(v)) return 0;
-  var p = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
-  var m = v / p;
+  var raw = v / Math.max(1, lines);
+  var p = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+  var m = raw / p;
   return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+// Leading empty columns (before the first data) are dropped, keeping one.
+function trimLeading(cols) {
+  var i = 0;
+  while (i < cols.length - 1 && !cols[i].segs.some(function (g) { return g.v > 0; })) i++;
+  return i ? cols.slice(i) : cols;
 }
 
 // Stacked bars at a given pixel size. cols: [{ label, title, segs: [{ v, cls }] }].
@@ -893,23 +909,27 @@ function barChart(cols, o) {
   var padL = axis ? 46 : 1;
   var padB = axis ? 15 : 1;
   var padT = 5;
+  if (o.trim) cols = trimLeading(cols);
+  var plotW = W - padL - 1;
+  var plotH = H - padT - padB;
   var max = o.max || 0;
   if (!max) {
     cols.forEach(function (c) { var s = 0; c.segs.forEach(function (g) { s += g.v; }); if (s > max) max = s; });
-    max = niceMax(max);
+    // A little headroom over the tallest bar, not a round number far above it.
+    max = max * 1.08;
   }
-  var plotW = W - padL - 1;
-  var plotH = H - padT - padB;
+  var gstep = niceStep(max, Math.max(2, Math.min(6, Math.floor(plotH / 40))));
   var n = Math.max(1, cols.length);
   var step = plotW / n;
   var bw = Math.max(1, Math.min(step > 5 ? step - 2 : step * 0.8, 26));
-  var every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(plotW / 64))));
+  var every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(plotW / (o.labelW || 64)))));
   var out = '<svg class="chart" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(o.label || '') + '">';
   if (axis) {
-    for (var g = 0; g <= 2; g++) {
-      var gy = (padT + plotH - plotH * g / 2).toFixed(1);
+    var lines = max > 0 && gstep > 0 ? Math.floor(max / gstep + 1e-9) : 0;
+    for (var g = 0; g <= lines; g++) {
+      var gy = (padT + plotH - (max > 0 ? plotH * g * gstep / max : 0)).toFixed(1);
       out += '<line class="grid" x1="' + padL + '" x2="' + W + '" y1="' + gy + '" y2="' + gy + '"/>'
-        + '<text class="ax" x="' + (padL - 5) + '" y="' + (Number(gy) + 3) + '" text-anchor="end">' + esc(max ? fmtVal(max * g / 2) : (g ? '' : '0')) + '</text>';
+        + '<text class="ax" x="' + (padL - 5) + '" y="' + (Number(gy) + 3) + '" text-anchor="end">' + esc(g ? fmtVal(g * gstep) : '0') + '</text>';
     }
   }
   cols.forEach(function (c, i) {
@@ -931,6 +951,13 @@ function barChart(cols, o) {
     }
   });
   return out + '</svg>';
+}
+
+// "14h", and "9 oct. 00h" on the first column and at each midnight.
+function hourLabel(at, first) {
+  var d = new Date(at);
+  var h = pad2(d.getHours()) + 'h';
+  return first || d.getHours() === 0 ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + h : h;
 }
 
 function typeSegs(c) {
@@ -955,7 +982,17 @@ function stripHtml(c, month, plans) {
     + '<span class="it" title="' + esc('Cache reads cost ' + fmtUsd(n.saved) + ' less than the same tokens as plain input; cache writes cost ' + fmtUsd(n.premium) + ' more than plain input. Net: ' + (n.net >= 0 ? 'the cache saves ' + fmtUsd(n.net) : 'the cache costs ' + fmtUsd(-n.net) + ' more than it saves') + '.') + '">'
     + '<span class="k">cache</span><span class="' + (n.net >= 0 ? 'pos-v' : 'neg-v') + '">' + (n.net >= 0 ? 'saved ' + fmtUsd(n.net) : fmtUsd(n.net) + ' net') + '</span></span>'
     + (month ? '<span class="it" title="API-equivalent value used this month' + (plans ? ', against the monthly price of the plans' : '') + '"><span class="k">month</span>' + fmtUsd(usdOf(month))
-      + (plans ? ' <span class="muted">/ $' + plans + ' \\u00b7 ' + (usdOf(month) / plans).toFixed(1) + '\\u00d7</span>' : '') + '</span>' : '');
+      + (plans ? ' <span class="muted">/ $' + plans + ' \\u00b7 ' + (usdOf(month) / plans).toFixed(1) + '\\u00d7</span>' : '') + '</span>' : '')
+    + unpricedHtml();
+}
+
+// Models with no list price: their tokens are counted, never priced as something else.
+function unpricedHtml() {
+  var list = ((usage && usage.models) || []).filter(function (m) { return !m.known; });
+  if (!list.length) return '';
+  var tok = 0;
+  list.forEach(function (m) { tok += m.tokens; });
+  return '<span class="it neg-v" title="' + esc('No list price, counted at $0: ' + list.map(function (m) { return m.model + ' ' + fmtTokens(m.tokens) + ' tok'; }).join(', ')) + '"><span class="k">unpriced</span>' + fmtTokens(tok) + ' tok</span>';
 }
 
 function renderUsageStatus() {
@@ -1040,7 +1077,7 @@ function capacityChart(u, pd, sel, size) {
   });
   var avg = tot.n ? Math.round(tot.pct / tot.n) : 0;
   return {
-    html: barChart(cols, { w: size.w, h: size.h, label: 'Used and lost capacity' }),
+    html: barChart(cols, { w: size.w, h: size.h, label: 'Used and lost capacity', trim: uDays === 0 }),
     legend: '<span><i class="sw cu"></i>Used</span><span><i class="sw cl"></i>Left unused at reset (estimate)</span>'
       + '<span>' + tot.n + ' resets \\u00b7 ' + avg + '% used on average \\u00b7 lost \\u2248 ' + fmtUsd(tot.lost) + ' / ' + fmtTokens(tot.lostT) + ' tok</span>',
     sum: sum,
@@ -1055,16 +1092,16 @@ function overviewSeries(u, accs, pd, daily) {
     var start = 0;
     var h0 = Math.floor(u.firstAt / 3600000) * 3600000;
     for (var i = 0; i < hours.length; i++) if (hours[i] <= h0) start = i;
-    start = Math.min(start, Math.max(0, hours.length - 24));
     var rows = {};
     accs.forEach(function (a) { rows[a.id] = (u.hourly[a.id] || hours.map(blankCell)).slice(start); });
     return { labels: hours.slice(start), rows: rows, unit: 'hour',
-      label: function (at) { return pad2(new Date(at).getHours()) + 'h'; },
+      label: function (at, i) { return hourLabel(at, i === 0); }, labelW: 80,
       head: function (at) { return fmtWhen(at) + ' (1h)'; } };
   }
   var gr = grouped(pd.days, daily);
   gr.unit = gr.weekly ? 'week' : 'day';
   gr.label = function (d) { return fmtDay(d); };
+  gr.labelW = 64;
   gr.head = function (d) { return (gr.weekly ? 'Week of ' : '') + fmtDay(d); };
   return gr;
 }
@@ -1125,11 +1162,14 @@ function renderUsage() {
           var c = gr.rows[a.id][i];
           addCell(tot, c);
           segs.push({ v: total(c), cls: accClass(a.id) });
-          if (tokOf(c) > 0) lines.push(a.label + ': ' + fmtTokens(tokOf(c)) + ' tok \\u00b7 ' + fmtUsd(usdOf(c)));
+          if (tokOf(c) > 0) {
+            lines.push(a.label + ': ' + fmtUsd(usdOf(c)) + ' \\u00b7 ' + fmtTokens(tokOf(c)) + ' tok (in ' + fmtUsd(c[4]) + ', cache write ' + fmtUsd(c[5])
+              + ', cache read ' + fmtUsd(c[6]) + ', out ' + fmtUsd(c[7]) + ')');
+          }
         });
-        return { label: gr.label(d), title: cellLines(lines.join('\\n'), tot), segs: segs, raw: [tokOf(tot), usdOf(tot)] };
+        return { label: gr.label(d, i), title: cellLines(lines.join('\\n'), tot), segs: segs, raw: [tokOf(tot), usdOf(tot)] };
       });
-      html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + gr.unit + ' by seat' });
+      html = barChart(ocols, { w: size.w, h: size.h, label: 'Usage per ' + gr.unit + ' by seat', trim: uDays === 0, labelW: gr.labelW });
       legend = accs.map(function (a) { return '<span><i class="sw ' + accClass(a.id) + '"></i>' + esc(a.label) + '</span>'; }).join('');
     } else {
       // One small chart per seat, all on the same scale. A click opens that seat in Daily.
@@ -1149,6 +1189,7 @@ function renderUsage() {
           + '<div class="mh"><i class="sw ' + cls + '"></i><b>' + esc(a.label) + '</b><span class="num muted">' + pct(total(t), allTotal) + '</span></div>'
           + barChart(cols, { w: 150, h: mh, max: shared, axis: false, label: a.label })
           + '<div class="mf"><span>' + fmtUsd(usdOf(t)) + '</span><span>' + fmtTokens(tokOf(t)) + '</span><span>r/w ' + fmtRatio(cacheRatio(t)) + '</span></div>'
+          + (plan ? '<div class="mf" title="API-equivalent value used this month against the plan price"><span>' + esc(plan.label) + '</span><span>month ' + fmtUsd(monthOf(a.id)) + ' / $' + plan.monthlyUsd + '</span></div>' : '')
           + '</button>';
       }).join('') + '</div>';
     }
@@ -1163,16 +1204,16 @@ function renderUsage() {
     var hcols = hrows.slice(from).map(function (c, j) {
       var at = u.hours[from + j];
       addCell(sum, c);
-      return { label: pad2(new Date(at).getHours()) + 'h', title: cellLines(fmtWhen(at) + ' (1h) \\u00b7 ' + name, c), segs: typeSegs(c), raw: [tokOf(c), usdOf(c)] };
+      return { label: hourLabel(at, j === 0), title: cellLines(fmtWhen(at) + ' (1h) \\u00b7 ' + name, c), segs: typeSegs(c), raw: [tokOf(c), usdOf(c)] };
     });
-    html = barChart(hcols, { w: size.w, h: size.h, label: 'Usage per hour' });
+    html = barChart(hcols, { w: size.w, h: size.h, label: 'Usage per hour', labelW: 80 });
   } else {
     var drows = pd.cut(rowsOf(u.daily, sel, u.days.length) || []);
     var dcols = drows.map(function (c, i) {
       addCell(sum, c);
       return { label: fmtDay(pd.days[i]), title: cellLines(fmtDay(pd.days[i]) + ' \\u00b7 ' + name, c), segs: typeSegs(c), raw: [tokOf(c), usdOf(c)] };
     });
-    if (uView === 'daily') html = barChart(dcols, { w: size.w, h: size.h, label: 'Usage per day' });
+    if (uView === 'daily') html = barChart(dcols, { w: size.w, h: size.h, label: 'Usage per day', trim: uDays === 0 });
     else html = costView(sum);
   }
   if (uView === 'hourly' || uView === 'daily') {
@@ -1295,10 +1336,22 @@ $('usePeriod').addEventListener('change', function () {
 $('histBox').addEventListener('toggle', function () { render(); });
 // The chart is drawn at the size of its box: redraw it when the panel is resized.
 var resizeTimer = 0;
-window.addEventListener('resize', function () {
+var lastSize = '';
+function onResize() {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(function () { resizeTimer = 0; renderUsage(); }, 150);
-});
+  resizeTimer = setTimeout(function () {
+    resizeTimer = 0;
+    var z = chartSize();
+    var key = z.w + 'x' + z.h;
+    if (key === lastSize) return;
+    lastSize = key;
+    renderUsage();
+  }, 120);
+}
+window.addEventListener('resize', onResize);
+if (typeof ResizeObserver === 'function') {
+  try { new ResizeObserver(onResize).observe($('useChart')); } catch (e) { /* the window listener is enough */ }
+}
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) {
     clearTimeout(pollTimer); pollTimer = 0;

@@ -46,7 +46,7 @@ export function agentOfCwd(cwd: string | undefined): string {
 }
 
 /** The usage vector of one transcript line, or null when it carries none. */
-export function parseLine(line: string): { id: string; at: number; model: string; cwd?: string; v: Vec } | null {
+export function parseLine(line: string): { id: string; at: number; model: string; cwd?: string; v: Vec; ttlKnown: boolean } | null {
   if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
   let j: {
     type?: string;
@@ -87,7 +87,7 @@ export function parseLine(line: string): { id: string; at: number; model: string
   }
   const v: Vec = [1, n(u.input_tokens), w5, w1, n(u.cache_read_input_tokens), n(u.output_tokens)];
   if (v[1] + v[2] + v[3] + v[4] + v[5] === 0) return null;
-  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v };
+  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v, ttlKnown: !!u.cache_creation || write === 0 };
 }
 
 /** Message ids remembered per file: a response is written once per content block. */
@@ -113,6 +113,8 @@ export class TranscriptScanner {
   private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  /** Last cache TTL seen per seat. */
+  private readonly ttl = new Map<string, '5m' | '1h'>();
   readonly status: ScanStatus;
 
   constructor(private readonly opts: ScannerOptions) {
@@ -378,6 +380,14 @@ export class TranscriptScanner {
       }
       const p = parseLine(line);
       if (!p) continue;
+      // A total without its TTL split: the TTL this seat was last seen writing
+      // with (Claude Code writes its cache for 1 hour by default).
+      if (p.ttlKnown) {
+        if (p.v[2] + p.v[3] > 0) this.ttl.set(account, p.v[3] > 0 ? '1h' : '5m');
+      } else if ((this.ttl.get(account) ?? '1h') === '1h') {
+        p.v[3] = p.v[2];
+        p.v[2] = 0;
+      }
       const prev = ids[p.id];
       let v: Vec = p.v;
       if (prev) {

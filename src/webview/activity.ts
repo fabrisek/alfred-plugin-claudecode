@@ -71,7 +71,7 @@ export type ActivityItem = {
   tokensOut?: number;
   /** input, cache write, cache read, output (main loop) */
   tokens?: [number, number, number, number];
-  /** API-equivalent USD of `tokens`, at the served model's list price (usage/pricing.ts). */
+  /** API-equivalent USD of `tokens`, at the served model's list price (usage/pricing.ts); absent when it has none. */
   cost?: [number, number, number, number];
   /** Engine requests report only cached / uncached prompt: the uncached part is counted as cache write. */
   costApprox?: boolean;

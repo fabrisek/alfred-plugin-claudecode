@@ -166,7 +166,8 @@ describe('TranscriptScanner', () => {
     const { store, scanner } = make(statePath);
     await scanner.scan();
     const t = store.totalsByAccount();
-    assert.deepEqual(t['seat-a'], [3, 2 + 2 + 50, 1000, 0, 1000, 40 + 20 + 7], 'r1 once with its final output, r2, sub-agent r3');
+    // r1's cache write has no TTL split: it is a 1h write, the TTL Claude Code uses.
+    assert.deepEqual(t['seat-a'], [3, 2 + 2 + 50, 0, 1000, 1000, 40 + 20 + 7], 'r1 once with its final output, r2, sub-agent r3');
     assert.deepEqual(t.unknown, [1, 2, 0, 0, 0, 3], 'gateway session: no seat recorded');
     assert.deepEqual(t['seat-b'], [1, 2, 0, 0, 0, 11]);
     assert.equal(Object.keys(t).length, 3, 'personal sessions left out');

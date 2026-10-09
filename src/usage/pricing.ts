@@ -33,6 +33,8 @@ const TABLE: Array<[string, Price]> = [
   ['claude-opus-4', p(15, 1.5, 75)],
   ['claude-sonnet-5-5', p(2, 0.1, 10)],
   ['claude-sonnet-5', p(2, 0.2, 10)],
+  ['claude-sonnet-4-6', p(3, 0.3, 15)],
+  ['claude-sonnet-4-5', p(3, 0.3, 15)],
   ['claude-sonnet-4', p(3, 0.3, 15)],
   // Haiku 5.5 is priced by prompt length; the scanner tags long prompts (see LONG_PROMPT).
   ['claude-haiku-5-5' + '@long', p(0.5, 0.05, 2.5)],
@@ -44,13 +46,18 @@ const TABLE: Array<[string, Price]> = [
 /** Models priced by prompt length: the long-prompt rate applies above this many prompt tokens. */
 export const LONG_PROMPT: Record<string, number> = { 'claude-haiku-5-5': 100_000 };
 
-/** Unknown ids are priced like the current Opus, and flagged as such. */
-const FALLBACK: Price = p(4, 0.2, 20);
+/** An id with no list price is worth $0 here and reported as unpriced, never guessed. */
+const UNPRICED: Price = { input: 0, write5m: 0, write1h: 0, cacheRead: 0, output: 0 };
 
-export function priceOf(model: string): { price: Price; known: boolean } {
+/**
+ * Price of the model actually served. Dated ids (`claude-opus-4-5-20251101`,
+ * `claude-haiku-4-5-20251001`) match their family by prefix; the table is
+ * ordered so that the most specific prefix wins.
+ */
+export function priceOf(model: string): { price: Price; known: boolean; family: string | null } {
   const m = model.toLowerCase();
-  for (const [prefix, price] of TABLE) if (m.startsWith(prefix)) return { price, known: true };
-  return { price: FALLBACK, known: false };
+  for (const [prefix, price] of TABLE) if (m.startsWith(prefix)) return { price, known: true, family: prefix };
+  return { price: UNPRICED, known: false, family: null };
 }
 
 /** Model id as stored: a long-prompt request of a length-priced model gets `@long`. */
@@ -114,8 +121,9 @@ export function planOf(info: { subscriptionType?: string | null; rateLimitTier?:
  * prompt cache with the 1-hour TTL (what its transcripts report), so the
  * 1h rate is the default.
  */
-export function priceTokens(model: string, t: [number, number, number, number], write: '5m' | '1h' = '1h'): [number, number, number, number] {
-  const { price: q } = priceOf(model);
+export function priceTokens(model: string, t: [number, number, number, number], write: '5m' | '1h' = '1h'): [number, number, number, number] | undefined {
+  const { price: q, known } = priceOf(model);
+  if (!known) return undefined;
   const r = (x: number): number => Math.round(x * 1e5) / 1e5;
   return [r((t[0] * q.input) / 1e6), r((t[1] * (write === '1h' ? q.write1h : q.write5m)) / 1e6), r((t[2] * q.cacheRead) / 1e6), r((t[3] * q.output) / 1e6)];
 }

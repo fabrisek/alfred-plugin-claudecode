@@ -268,6 +268,18 @@ export class UsageStore {
     return out;
   }
 
+  /** Raw totals per served model id: model → vector. */
+  totalsByModel(): Record<string, Vec> {
+    const out: Record<string, Vec> = {};
+    for (const bucket of Object.values(this.data.days)) {
+      for (const [ki, v] of Object.entries(bucket)) {
+        const model = this.data.keys[Number(ki)].split(SEP)[1];
+        addVec((out[model] ??= emptyVec()), v);
+      }
+    }
+    return out;
+  }
+
   /** Per-day totals: day → account → vector. */
   dailyByAccount(): Record<string, Record<string, Vec>> {
     const out: Record<string, Record<string, Vec>> = {};

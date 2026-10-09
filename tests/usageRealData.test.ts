@@ -17,6 +17,7 @@ import { describe, it } from 'node:test';
 import { UsageStore, dayOf, CELL_LEN } from '../src/usage/history.js';
 import { renderDashboard } from '../src/webview/dashboard.js';
 import { runPage } from './webviewVm.js';
+import { USAGE_ATTRIBUTION_REV } from '../src/usage/register.js';
 
 const STATE = join(fileURLToPath(new URL('../state/', import.meta.url)), 'usage-history.json');
 const HAVE = existsSync(STATE);
@@ -24,7 +25,7 @@ const scan = { running: false, backfilled: true, filesDone: 0, filesTotal: 0, la
 
 function realView() {
   // Read-only: the store is only saved when something was added, and nothing is.
-  const store = new UsageStore(STATE, Date.now, 3);
+  const store = new UsageStore(STATE, Date.now, USAGE_ATTRIBUTION_REV);
   const view = store.view({ scan, seats: [], hourSpan: 72 });
   return { store, view: { ok: true, ...view, version: 'real', capacity: { since: Date.now() - 86_400_000, rows: [] } } };
 }
