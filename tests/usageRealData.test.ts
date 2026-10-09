@@ -82,7 +82,7 @@ describe('usage history on the real data', { skip: !HAVE && 'no state/usage-hist
     const checked: string[] = [];
     for (const metric of ['tokens', 'cost']) {
       await page.click(page.doc.querySelector(`button[data-act=umetric][data-id=${metric}]`));
-      for (const v of ['overview', 'byseat', 'hourly', 'daily', 'cost', 'capacity']) {
+      for (const v of ['overview', 'byseat', 'hourly', 'daily', 'cost', 'capacity', 'quota']) {
         await page.click(page.doc.querySelector(`button[data-act=uview][data-id=${v}]`));
         const periods = page.doc.querySelectorAll('#usePeriod option').map((o) => o.getAttribute('value')!);
         for (const per of periods) {

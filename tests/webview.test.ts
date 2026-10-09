@@ -862,23 +862,47 @@ describe('Claude panel seats', () => {
     assert.match(page.doc.querySelector('tr[data-key=acc:a]')!.textContent, /\$1\.5\s*\$2\.0 today/);
   });
 
-  it('draws the quota over time: one line per seat, the drop at a reset, labels apart, dashed until the reset', async () => {
+  it('Usage > Quota: one row per seat by reset, nothing cut or stacked at 480 and 1200 px', async () => {
     const page = await seatsPage();
-    assert.ok(page.doc.querySelector('#quotaChart svg'), 'chart drawn');
-    const solid = page.doc.querySelectorAll('#quotaChart polyline.ln').filter((l) => !/proj/.test(l.getAttribute('class')!));
-    assert.equal(solid.length, 4);
-    // Seat a went 80% -> 2% at a reset: two points at the same x, the second far lower.
-    const pts = solid[0].getAttribute('points')!.split(' ').map((p) => p.split(',').map(Number));
-    assert.ok(pts.some((p, i) => i > 0 && p[0] === pts[i - 1][0] && p[1] - pts[i - 1][1] > 50), 'a sharp drop at the reset');
-    assert.equal(page.doc.querySelectorAll('#quotaChart polyline.proj').length, 4, 'every seat projected to its reset');
-    assert.ok(page.doc.querySelector('#quotaChart line.now'), 'a now marker');
-    const ys = page.doc.querySelectorAll('#quotaChart text.endl').map((t) => Number(t.getAttribute('y'))).sort((x, y) => x - y);
-    assert.equal(ys.length, 4);
+    assert.equal(page.$('quotaChart'), null, 'not in Seats any more');
+    await page.click(btn(page, 'tab', 'usage'));
+    await page.click(btn(page, 'uview', 'quota'));
+    assert.equal(page.$('qwinSeg')!.hidden, false);
+    const box = page.$('useChart')! as unknown as { clientWidth: number; clientHeight: number };
+    const { DomEvent } = await import('./miniDom.js');
+    for (const w of [480, 1200]) {
+      box.clientWidth = w;
+      box.clientHeight = 400;
+      page.doc.body.dispatchEvent(new DomEvent('resize'));
+      await page.advance(200);
+      await page.click(btn(page, 'uchart', 'bars'));
+      const names = page.doc.querySelectorAll('#useChart .qrow .qname').map((n) => n.textContent);
+      assert.deepEqual(names, ['C', 'B', 'A', 'D'], `${w}px: sorted by the soonest reset`);
+      for (const svg of page.doc.querySelectorAll('#useChart svg.qtrack')) {
+        assert.ok(Number(svg.getAttribute('width')) + 118 + 92 + 16 <= w, `${w}px: the track leaves the reserved columns their room`);
+        assert.equal(svg.querySelectorAll('text').length, 0, 'no label inside the track to overflow');
+        // The only vertical is the common "now" line.
+        const verticals = svg.querySelectorAll('line').filter((l) => l.getAttribute('x1') === l.getAttribute('x2'));
+        assert.equal(verticals.length, 1);
+        assert.equal(verticals[0].getAttribute('class'), 'now');
+      }
+      const nows = page.doc.querySelectorAll('#useChart svg.qtrack line.now').map((l) => l.getAttribute('x1'));
+      assert.equal(new Set(nows).size, 1, 'one time axis for every row');
+      assert.equal(page.doc.querySelectorAll('#useChart rect.qlose').length, 2, 'B and C lose a lot soon');
+      assert.equal(page.doc.querySelectorAll('#useChart polyline.proj').length, 0);
+    }
+    // Full width and 6 h of readings: the overlaid lines, without any projection.
+    await page.click(btn(page, 'uchart', 'lines'));
+    assert.ok(page.doc.querySelector('#useChart svg.lines'));
+    assert.equal(page.doc.querySelectorAll('#useChart polyline.proj').length, 0);
+    const ys = page.doc.querySelectorAll('#useChart text.endl').map((t) => Number(t.getAttribute('y'))).sort((x, y) => x - y);
     for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11.9, `labels apart: ${ys}`);
-    const tip = page.doc.querySelectorAll('#quotaChart g.col title').map((t) => t.textContent)[30];
-    assert.match(tip, /A: .*\nB: .*\nC: .*\nD: /, 'the tooltip has every seat at that instant');
-    await page.click(btn(page, 'qwin', 'week'));
-    assert.match(page.$('quotaChart')!.textContent, /No quota reading yet/);
+    // Narrow: never the overlaid chart.
+    box.clientWidth = 480;
+    page.doc.body.dispatchEvent(new DomEvent('resize'));
+    await page.advance(200);
+    assert.equal(page.doc.querySelector('#useChart svg.lines'), null);
+    assert.ok(page.doc.querySelector('#useChart .qrow'));
     assert.deepEqual(page.errors, []);
   });
 

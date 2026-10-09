@@ -204,6 +204,14 @@ svg.chart { display: block; }
 .tag.use { color: var(--warn); border-color: currentColor; }
 td.c-week:empty::after { content: ''; }
 .qbox { flex: 1; min-height: 140px; min-width: 0; overflow: hidden; padding: 4px 8px; }
+.qrows { display: flex; flex-direction: column; gap: 4px; }
+.qrow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.qname { flex: none; width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.qreset { flex: none; width: 92px; text-align: right; white-space: nowrap; font-size: 12px; }
+.qtrack { flex: none; display: block; }
+.qleft { fill: var(--muted); opacity: .45; }
+.qlose { fill: var(--warn); opacity: .8; }
+.warn-t { color: var(--warn); }
 .capnote { color: var(--muted); font-size: 12px; padding: 24px 0; text-align: center; }
 .cu { fill: var(--s1); background: var(--s1); }
 .cl { fill: var(--sunk); background: var(--sunk); }
@@ -757,6 +765,12 @@ function spreadLabels(ys, gap, top, bottom) {
 
 // series: [{ id, label, color, pts: [[x, y]...] (solid), proj: [[x, y]...] (dashed), endText }]
 // o: { w, h, x0, x1, yMax, yFmt, xLabel(x), now, slices, sliceTitle(x) }
+// Text cut to a width in px (11px font, ~6.2px per character), with an ellipsis.
+function fitText(t, px) {
+  var n = Math.max(3, Math.floor(px / 6.2));
+  return t.length > n ? t.slice(0, n - 1) + '\u2026' : t;
+}
+
 function lineChart(series, o) {
   var W = Math.max(120, Math.round(o.w || 720));
   var H = Math.max(80, Math.round(o.h || 200));
@@ -807,7 +821,7 @@ function lineChart(series, o) {
   ends.forEach(function (e, i) {
     var lx = padL + plotW + 6;
     out += '<line class="lead" style="stroke:' + e.sr.color + '" x1="' + (padL + plotW).toFixed(1) + '" x2="' + (lx - 2) + '" y1="' + e.y.toFixed(1) + '" y2="' + ly[i].toFixed(1) + '"/>'
-      + '<text class="endl" data-sid="' + esc(e.sr.id) + '" x="' + lx + '" y="' + (ly[i] + 3).toFixed(1) + '" style="fill:' + e.sr.color + '">' + esc(e.sr.label + (e.sr.endText ? ' ' + e.sr.endText : '')) + '</text>';
+      + '<text class="endl" data-sid="' + esc(e.sr.id) + '" x="' + lx + '" y="' + (ly[i] + 3).toFixed(1) + '" style="fill:' + e.sr.color + '">' + esc(fitText(e.sr.label + (e.sr.endText ? ' ' + e.sr.endText : ''), labelW - 8)) + '</text>';
   });
   // Hover: one slice per step, its title lists every series at that instant.
   var n = Math.max(1, o.slices || 48);
@@ -839,49 +853,85 @@ function stepPoints(list, until) {
 }
 
 var qWin = 'five';
-var qChartDrawn = '';
-function renderQuota() {
-  var box = $('quotaChart');
-  if (!box || !snap || !usage || !usage.quota) return;
+// Columns reserved around the time track, in px: the name, the reset time.
+var Q_NAME_W = 118;
+var Q_RESET_W = 92;
+
+// One row per seat, sorted by reset: name, the % used over what was recorded,
+// then a bar from now to the reset whose thickness is the quota left (warning
+// colour when a lot is lost soon), the reset time. One time axis for all rows.
+function quotaView(size) {
+  if (!snap || !usage || !usage.quota) return { html: '<div class="capnote">No quota reading yet.</div>', note: '' };
   var now = Date.now();
+  var key = qWin === 'five' ? 'five' : 'week';
   var span = qWin === 'five' ? 24 * 3600000 : 8 * 24 * 3600000;
-  var x0 = now - span;
-  var series = [];
+  var rows = [];
+  var first = now;
   var furthest = now;
   snap.accounts.forEach(function (a) {
     var q = usage.quota.series[a.id];
     if (!q) return;
-    var list = (qWin === 'five' ? q.five : q.week).filter(function (p) { return p[0] >= x0 - span; });
-    if (!list.length) return;
-    var cur = list[list.length - 1][1];
+    var list = (q[key] || []).filter(function (p) { return p[0] >= now - span; });
     var reset = qWin === 'five' ? q.fiveReset : q.weekReset;
-    var proj = [];
-    if (reset && reset > now) {
-      // What happens if nothing more is used: flat until the reset, then the drop.
-      proj = [[now, cur], [reset, cur], [reset, 0]];
-      if (reset > furthest) furthest = reset;
-    }
-    series.push({ id: a.id, label: a.label, color: accColor(a.id), pts: stepPoints(list, now), proj: proj, endText: Math.round(cur) + '%', reset: reset, cur: cur });
+    if (!list.length && !reset) return;
+    if (list.length && list[0][0] < first) first = list[0][0];
+    if (reset && reset > furthest) furthest = reset;
+    var cur = list.length ? list[list.length - 1][1] : null;
+    rows.push({ a: a, list: list, reset: reset && reset > now ? reset : null, cur: cur });
   });
-  if (!series.length) {
-    setHtml('quotaChart', '<div class="capnote">No quota reading yet: they are recorded at each usage refresh.</div>');
-    return;
-  }
-  var size = boxSize(box);
-  var x1 = Math.min(furthest, now + (qWin === 'five' ? 5 * 3600000 : 7 * 24 * 3600000));
-  var sel = series;
-  var html = lineChart(sel, {
-    w: size.w, h: size.h, x0: x0, x1: x1, yMax: 100, now: now, slices: 60, label: 'Quota used over time',
+  if (!rows.length) return { html: '<div class="capnote">No quota reading yet: they are recorded at each usage refresh.</div>', note: '' };
+  rows.sort(function (x, y) { return (x.reset || Infinity) - (y.reset || Infinity); });
+  var hist = now - first;
+  var note = hist < 3600000 ? 'collecting since ' + fmtClock(first) : '';
+  var x0 = first;
+  var x1 = Math.max(furthest, now + 60000);
+  var big = size.w >= 900 && hist >= 6 * 3600000 && uChart === 'lines';
+  if (big) return { html: quotaLines(rows, size, x0, x1, now), note: note };
+  var trackW = Math.max(60, Math.floor(size.w - Q_NAME_W - Q_RESET_W - 16));
+  var rowH = 24;
+  var X = function (t) { return Math.max(0, Math.min(trackW, trackW * (t - x0) / Math.max(1, x1 - x0))); };
+  var nowX = X(now).toFixed(1);
+  var html = '<div class="qrows">' + rows.map(function (r) {
+    var color = accColor(r.a.id);
+    var left = r.cur == null ? null : Math.max(0, 100 - r.cur);
+    var soon = r.reset && r.reset - now < 90 * 60000 && left != null && left >= 20;
+    var svg = '<svg class="qtrack" width="' + trackW + '" height="' + rowH + '" viewBox="0 0 ' + trackW + ' ' + rowH + '">';
+    // History: % used, 0 at the bottom, 100 at the top.
+    var pts = stepPoints(r.list, now).map(function (p) { return X(p[0]).toFixed(1) + ',' + (rowH - 2 - (rowH - 4) * Math.min(100, p[1]) / 100).toFixed(1); });
+    if (pts.length > 1) svg += '<polyline class="ln" style="stroke:' + color + '" points="' + pts.join(' ') + '"/>';
+    // Until the reset: the quota left, as the bar's thickness.
+    if (r.reset && left != null) {
+      var th = Math.max(2, (rowH - 6) * left / 100);
+      svg += '<rect class="' + (soon ? 'qlose' : 'qleft') + '" x="' + nowX + '" y="' + ((rowH - th) / 2).toFixed(1) + '" width="' + Math.max(1, X(r.reset) - X(now)).toFixed(1) + '" height="' + th.toFixed(1) + '"/>';
+    }
+    svg += '<line class="now" x1="' + nowX + '" x2="' + nowX + '" y1="0" y2="' + rowH + '"/></svg>';
+    var title = r.a.label + '\\n' + (r.cur == null ? 'no reading' : Math.round(r.cur) + '% used, ' + Math.round(left) + '% left')
+      + (r.reset ? '\\nresets ' + fmtWhen(r.reset) + (soon ? ': ' + Math.round(left) + '% lost if not used' : '') : '');
+    return '<div class="qrow" title="' + esc(title) + '">'
+      + '<span class="qname"><i class="sw ' + accClass(r.a.id) + '"></i>' + esc(r.a.label) + '</span>'
+      + svg
+      + '<span class="qreset num' + (soon ? ' warn-t' : '') + '">' + (r.reset ? esc(qWin === 'five' ? fmtClock(r.reset) : fmtWhen(r.reset)) : '\\u2014')
+      + (left != null ? ' \\u00b7 ' + Math.round(left) + '%' : '') + '</span></div>';
+  }).join('') + '</div>';
+  return { html: html, note: note };
+}
+
+// Full width and enough history: every seat on one chart, names at the line ends, no projection.
+function quotaLines(rows, size, x0, x1, now) {
+  var series = rows.filter(function (r) { return r.list.length; }).map(function (r) {
+    return { id: r.a.id, label: r.a.label, color: accColor(r.a.id), pts: stepPoints(r.list, now), endText: Math.round(r.cur) + '%' };
+  });
+  return lineChart(series, {
+    w: size.w, h: size.h, x0: x0, x1: now, yMax: 100, slices: 60, label: 'Quota used over time',
     yFmt: function (v) { return Math.round(v) + '%'; },
     xLabel: function (x) { return qWin === 'five' ? hourLabel(Math.round(x / 3600000) * 3600000, false) : fmtWhen(x); },
     sliceTitle: function (x) {
-      return fmtWhen(x) + (x > now ? ' (ahead, if nothing more is used)' : '') + '\\n' + sel.map(function (sr) {
-        var v = x > now ? (sr.reset && x >= sr.reset ? 0 : sr.cur) : stepAt(usage.quota.series[sr.id][qWin === 'five' ? 'five' : 'week'], x);
+      return fmtWhen(x) + '\\n' + series.map(function (sr) {
+        var v = stepAt(usage.quota.series[sr.id][qWin === 'five' ? 'five' : 'week'], x);
         return sr.label + ': ' + (v == null ? '\\u2014' : Math.round(v) + '% used');
       }).join('\\n');
     },
   });
-  if (html !== qChartDrawn) { setHtml('quotaChart', html); qChartDrawn = html; }
 }
 
 function boxSize(el) {
@@ -951,7 +1001,6 @@ function render() {
   var so = $('seatSort');
   var want = s.settings.seatSort === 'reset' ? 'reset' : 'manual';
   if (document.activeElement !== so && so.value !== want) so.value = want;
-  renderQuota();
 
   var recent = s.recent || [];
   setText('histCount', recent.length ? String(Math.min(recent.length, 8)) : '');
@@ -1014,7 +1063,6 @@ function pollUsage() {
     } else {
       usage = r;
       renderUsage();
-      qChartDrawn = '';
       render();
     }
   }, function (err) {
@@ -1406,7 +1454,9 @@ function renderUsage() {
   setSeg('umetric', uMetric);
   setSeg('uview', uView);
   setSeg('uchart', uChart);
-  $('uchartSeg').hidden = uView !== 'overview';
+  $('uchartSeg').hidden = uView !== 'overview' && uView !== 'quota';
+  $('qwinSeg').hidden = uView !== 'quota';
+  setSeg('qwin', qWin);
   var hourly = uView === 'hourly';
   var pv = hourly ? String(uHours) : String(uDays);
   var popts = hourly ? [['24', '24h'], ['48', '48h']] : [['0', 'Since ' + fmtDay(u.days && u.days[0] ? u.days[0] : dayKey(new Date()))], ['7', '7d'], ['30', '30d'], ['90', '90d']];
@@ -1490,6 +1540,10 @@ function renderUsage() {
           + '</button>';
       }).join('') + '</div>';
     }
+  } else if (uView === 'quota') {
+    var qv = quotaView(size);
+    html = qv.html;
+    legend = qv.note ? '<span>' + esc(qv.note) + '</span>' : '';
   } else if (uView === 'capacity') {
     var cv = capacityChart(u, pd, sel, size);
     html = cv.html;
@@ -1555,7 +1609,7 @@ function onAct(b) {
   var a = accountOf(id);
   if (act === 'flash-close') { flash('', ''); return; }
   if (act === 'runs') { actOpen = !actOpen; render(); return; }
-  if (act === 'qwin') { qWin = id === 'week' ? 'week' : 'five'; setSeg('qwin', qWin); qChartDrawn = ''; renderQuota(); return; }
+  if (act === 'qwin') { qWin = id === 'week' ? 'week' : 'five'; renderUsage(); return; }
   if (act === 'uchart') { uChart = id === 'lines' ? 'lines' : 'bars'; renderUsage(); return; }
   if (act === 'usel') { uSel = id; uView = 'daily'; renderUsage(); return; }
   if (act === 'umetric') { uMetric = id === 'cost' ? 'cost' : 'tokens'; renderUsage(); return; }
@@ -1644,18 +1698,15 @@ function onResize() {
   resizeTimer = setTimeout(function () {
     resizeTimer = 0;
     var z = chartSize();
-    var q = boxSize($('quotaChart'));
-    var key = z.w + 'x' + z.h + '/' + q.w + 'x' + q.h;
+    var key = z.w + 'x' + z.h;
     if (key === lastSize) return;
     lastSize = key;
     renderUsage();
-    qChartDrawn = '';
-    renderQuota();
   }, 120);
 }
 window.addEventListener('resize', onResize);
 if (typeof ResizeObserver === 'function') {
-  try { var ro = new ResizeObserver(onResize); ro.observe($('useChart')); ro.observe($('quotaChart')); } catch (e) { /* the window listener is enough */ }
+  try { var ro = new ResizeObserver(onResize); ro.observe($('useChart')); } catch (e) { /* the window listener is enough */ }
 }
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) {
@@ -1731,17 +1782,13 @@ export function renderDashboard(): string {
     </div>
     <div class="facts" id="seatFacts"></div>
   </section>
-  <section class="zone grow">
-    <div class="zh"><b>Quota over time</b><span class="muted small">used, with the drop at each reset; dashed: if nothing more is used</span><span class="spacer"></span>
-      <span class="seg"><button class="on" data-act="qwin" data-id="five">5h</button><button data-act="qwin" data-id="week">Week</button></span></div>
-    <div class="qbox" id="quotaChart"></div>
-  </section>
 </div>
 
 <div class="pane" id="pane-usage" hidden>
   <section class="zone grow">
     <div class="zh">
-      <span class="seg"><button data-act="uview" data-id="overview">Overview</button><button data-act="uview" data-id="byseat">By seat</button><button data-act="uview" data-id="hourly">Hourly</button><button data-act="uview" data-id="daily">Daily</button><button data-act="uview" data-id="cost">Cost</button><button data-act="uview" data-id="capacity">Capacity</button></span>
+      <span class="seg"><button data-act="uview" data-id="overview">Overview</button><button data-act="uview" data-id="byseat">By seat</button><button data-act="uview" data-id="hourly">Hourly</button><button data-act="uview" data-id="daily">Daily</button><button data-act="uview" data-id="cost">Cost</button><button data-act="uview" data-id="capacity">Capacity</button><button data-act="uview" data-id="quota">Quota</button></span>
+      <span class="seg" id="qwinSeg" hidden><button data-act="qwin" data-id="five">5h</button><button data-act="qwin" data-id="week">Week</button></span>
       <span class="seg" id="ucapSeg" hidden><button data-act="ucap" data-id="five_hour">5h</button><button data-act="ucap" data-id="seven_day">Week</button></span>
       <span class="spacer"></span>
       <select class="field" id="useAcc" title="Seat"></select>
