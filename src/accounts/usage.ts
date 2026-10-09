@@ -205,9 +205,18 @@ export async function readCredentials(path: string): Promise<OAuthCredentials | 
   }
 }
 
+/** Retry-After as milliseconds: seconds, or an HTTP date. */
+export function retryAfterMs(v: string | null | undefined, now = Date.now()): number | undefined {
+  if (!v) return undefined;
+  const s = Number(v);
+  if (Number.isFinite(s) && s >= 0) return s * 1000;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, t - now) : undefined;
+}
+
 export type UsageFetchResult =
   | { ok: true; usage: AccountUsage }
-  | { ok: false; reason: string; authFailed?: boolean };
+  | { ok: false; reason: string; authFailed?: boolean; status?: number; retryAfterMs?: number };
 
 /**
  * Poll the usage endpoint with a bearer token. Never throws, never logs the
@@ -236,8 +245,10 @@ export async function fetchUsage(
     });
     if (res.status === 401) return { ok: false, reason: 'token rejected (401)', authFailed: false };
     if (res.status === 403) return { ok: false, reason: 'usage not readable with this token (403)' };
-    if (res.status === 429) return { ok: false, reason: 'usage endpoint rate limited (429)' };
-    if (!res.ok) return { ok: false, reason: `usage endpoint HTTP ${res.status}` };
+    if (res.status === 429) {
+      return { ok: false, reason: 'usage endpoint rate limited (429)', status: 429, retryAfterMs: retryAfterMs(res.headers.get('retry-after')) };
+    }
+    if (!res.ok) return { ok: false, reason: `usage endpoint HTTP ${res.status}`, status: res.status, retryAfterMs: retryAfterMs(res.headers.get('retry-after')) };
     return { ok: true, usage: parseUsageResponse(await res.json()) };
   } catch (err) {
     return {

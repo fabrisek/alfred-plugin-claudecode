@@ -15,6 +15,7 @@ import {
   type CliInfo,
 } from './accounts/cli.js';
 import { fetchUsage, readCredentials } from './accounts/usage.js';
+import { SPACING_MS, UsageFetchPolicy } from './accounts/usagePolicy.js';
 import { createDashboardWebview } from './webview/dashboard.js';
 import { ActivityBoard, instrumentProvider, runItem, type ActivityItem } from './webview/activity.js';
 import {
@@ -109,7 +110,10 @@ class UsageRefresher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSweep = 0;
 
-  constructor(private readonly pool: AccountPool) {}
+  /** Rations the reads of the usage endpoint (accounts/usagePolicy.ts). */
+  readonly policy = new UsageFetchPolicy();
+
+  constructor(private readonly pool: AccountPool, private readonly log?: { info(m: string, meta?: Record<string, unknown>): void }) {}
 
   start(): void {
     this.timer = setInterval(() => {
@@ -125,10 +129,17 @@ class UsageRefresher {
     this.timer = null;
   }
 
-  refreshAll(): Promise<void> {
+  /** Every seat, one after the other, spaced: never a burst of reads. */
+  async refreshAll(manual = false): Promise<void> {
     this.lastSweep = Date.now();
     const targets = this.pool.list().filter((a) => a.enabled && this.pool.hasCredentials(a));
-    return Promise.all(targets.map((a) => this.refresh(a))).then(() => undefined);
+    for (const a of targets) {
+      const wait = this.policy.waitFor(a.id, { exhaustedUntil: this.pool.runtime(a.id).exhaustedUntil, manual });
+      // Only the spacing is waited for here; a seat that is not due is skipped.
+      if (wait > 0 && wait > SPACING_MS) continue;
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      await this.refresh(a, manual);
+    }
   }
 
   /** After a request: the CLI just refreshed the token, so the API numbers are readable again. */
@@ -144,9 +155,11 @@ class UsageRefresher {
     t.unref?.();
   }
 
-  refresh(a: Account): Promise<void> {
+  refresh(a: Account, manual = false): Promise<void> {
     const existing = this.running.get(a.id);
     if (existing) return existing;
+    // Not due (interval, backoff, exhausted, hourly ceiling): the cached value stays.
+    if (this.policy.waitFor(a.id, { exhaustedUntil: this.pool.runtime(a.id).exhaustedUntil, manual }) > 0) return Promise.resolve();
     const p = this.doRefresh(a).finally(() => this.running.delete(a.id));
     this.running.set(a.id, p);
     return p;
@@ -171,7 +184,10 @@ class UsageRefresher {
       this.pool.markUsageStale(a.id, 'not logged in');
       return;
     }
+    this.policy.begin(a.id);
     const res = await fetchUsage(token, expiresAt);
+    this.policy.end(a.id, res.ok ? { ok: true } : { ok: false, status: res.status, retryAfterMs: res.retryAfterMs });
+    this.log?.info('usage read', { account: a.id, ok: res.ok, ...(res.ok ? {} : { reason: res.reason }), lastHour: this.policy.stats().total });
     if (!res.ok) {
       this.pool.markUsageStale(a.id, res.reason);
       return;
@@ -240,7 +256,7 @@ const plugin: AlfredPlugin = {
         if (n > 0) ctx.logger.info('killed orphan Claude Code processes from a previous run', { count: n });
       })
       .catch((err: unknown) => ctx.logger.warn('orphan reaping failed', { err: (err as Error).message }));
-    const usage = new UsageRefresher(pool);
+    const usage = new UsageRefresher(pool, ctx.logger);
     refresher = usage;
 
     // One session store for every seat, so a conversation can continue on
@@ -460,9 +476,10 @@ const plugin: AlfredPlugin = {
         const id = (args as { id?: string } | undefined)?.id;
         if (id) {
           pool.clearAuthFailed(requireId(args));
-          await usage.refresh(pool.get(id)!);
+          await usage.refresh(pool.get(id)!, true);
         } else {
-          await usage.refreshAll();
+          // In the background: spaced reads take a while, the panel need not wait.
+          void usage.refreshAll(true);
         }
         return {};
       }),
