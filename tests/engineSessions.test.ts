@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Message } from '@alfred/sdk';
 import { AccountPool } from '../src/accounts/pool.js';
-import { ClaudeCodeProvider, __setQueryForTests } from '../src/ClaudeCodeProvider.js';
+import { ClaudeCodeProvider, IN_PLACE_RETRY_DELAYS_MS, __setQueryForTests } from '../src/ClaudeCodeProvider.js';
 import {
   ASSISTANT_SLOT,
   CACHE_TTL_1H,
@@ -517,14 +517,37 @@ describe('engine sessions: planning', () => {
     assert.deepEqual(plan.kind === 'continue' && plan.delta.map((m) => m.role), ['tool']);
   });
 
-  it('refuses another seat, a replay, or an assistant message it did not write', () => {
+  it('refuses another seat or a replay, and sends an assistant message it did not write as context', () => {
     const r = rec([messageFingerprint(user('hi')), ASSISTANT_SLOT]);
     assert.equal(planSession(r, { accountId: 'b', system: SYSTEM, messages: [user('hi'), user('x'), user('y')] }).kind, 'fresh');
     assert.equal(planSession(r, { accountId: 'a', system: SYSTEM, messages: [user('hi'), { role: 'assistant', content: 'x' }] }).kind, 'fresh');
-    assert.equal(
-      planSession(r, { accountId: 'a', system: SYSTEM, messages: [user('hi'), { role: 'assistant', content: 'x' }, { role: 'assistant', content: 'y' }] }).kind,
-      'fresh',
-    );
+    // Another agent's reply (or a reply served outside the session) after the
+    // session's own: continued, never re-written from scratch.
+    const plan = planSession(r, {
+      accountId: 'a',
+      system: SYSTEM,
+      messages: [user('hi'), { role: 'assistant', content: 'x' }, { role: 'assistant', content: 'y' }, user('z')],
+    });
+    assert.equal(plan.kind, 'continue');
+    if (plan.kind === 'continue') {
+      assert.equal(plan.foreign, 1);
+      assert.deepEqual(plan.delta.map((m) => m.content), ['y', 'z']);
+    }
+  });
+
+  it('describes two distant system prompt changes as two small updates, not a rewrite', () => {
+    // Seen live: a memory file revision line near the top and a line near the
+    // end changed; the single prefix/suffix diff called 95k of 115k changed.
+    const body = Array.from({ length: 400 }, (_, i) => `line ${i} of the agent persona and tools`).join('\n');
+    const prev = `# Memory\nrevision 1\n${body}\n## Runtime\nturn 1`;
+    const next = `# Memory\nrevision 2\n${body}\n## Runtime\nturn 2`;
+    const note = systemUpdateNote(prev, next);
+    assert.notEqual(note, 'too-large');
+    assert.match(String(note), /Now reads:\nrevision 2/);
+    assert.match(String(note), /Now reads:\nturn 2/);
+    assert.ok(!String(note).includes('line 200'), 'the unchanged middle is not repeated');
+    // A real rewrite still starts over.
+    assert.equal(systemUpdateNote(prev, `You are someone else.\n${'x\n'.repeat(500)}`), 'too-large');
   });
 
   it('summarises a small system change and rejects a rewrite', () => {
@@ -588,5 +611,175 @@ describe('engine sessions: plugin unload and lost processes', () => {
     assert.equal(rec?.sessionId, null);
     assert.match(String(rec?.lostReason), /ended before its reply/);
     assert.equal(planSession(rec, { accountId: 'seat', system: SYSTEM, messages: [{ role: 'user', content: 'x' }] }).kind, 'fresh');
+  });
+});
+
+describe('engine sessions: cache-preserving behaviour (2026-10-10)', () => {
+  type Behaviour = 'ok' | 'throttle' | 'crash' | 'silent';
+  type SeatSpawn = { options: Record<string, unknown>; inputs: string[]; seatToken: string; flags: unknown[] };
+
+  /**
+   * A fake CLI per seat token. `plan[token]` is consumed one entry per user
+   * message that reaches that seat (default `ok`).
+   */
+  function scriptedCli(plan: Record<string, Behaviour[]>, opts: { cacheWrite?: number } = {}) {
+    const spawns: SeatSpawn[] = [];
+    let sessions = 0;
+    const fn = (args: { prompt: AsyncIterable<{ message: { content: Array<{ text?: string }> } }>; options: Record<string, unknown> }) => {
+      const env = (args.options.env ?? {}) as Record<string, string>;
+      const seatToken = env.CLAUDE_CODE_OAUTH_TOKEN ?? '';
+      const spawn: SeatSpawn = { options: args.options, inputs: [], seatToken, flags: [] };
+      spawns.push(spawn);
+      const sid = (args.options.resume as string | undefined) ?? `session-${++sessions}`;
+      const controller = args.options.abortController as AbortController | undefined;
+      async function* run() {
+        let n = 0;
+        for await (const m of args.prompt) {
+          n++;
+          spawn.inputs.push(m.message.content.map((b) => b.text ?? '').join(' | '));
+          const behaviour = plan[seatToken]?.shift() ?? 'ok';
+          if (behaviour === 'crash') throw new Error('Claude Code process exited with code 1');
+          if (behaviour === 'silent') {
+            await new Promise((resolve) => controller?.signal.addEventListener('abort', resolve, { once: true }));
+            return;
+          }
+          yield { type: 'system', subtype: 'init', session_id: sid, tools: [], model: 'claude-opus-5-5' };
+          if (behaviour === 'throttle') {
+            yield { type: 'assistant', error: 'rate_limit', session_id: sid, message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 429 Too Many Requests' }] } };
+            yield { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 429 Too Many Requests', session_id: sid };
+            continue;
+          }
+          const text = `reply ${spawns.length}.${n}`;
+          yield {
+            type: 'stream_event',
+            session_id: sid,
+            event: { type: 'message_start', message: { usage: { input_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: opts.cacheWrite ?? 400, cache_creation: { ephemeral_1h_input_tokens: opts.cacheWrite ?? 400 } } } },
+          };
+          yield { type: 'stream_event', session_id: sid, event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } };
+          yield { type: 'stream_event', session_id: sid, event: { type: 'message_delta', usage: { output_tokens: 7 } } };
+          yield { type: 'assistant', uuid: `uuid-${spawns.length}-${n}`, session_id: sid, message: { model: 'claude-opus-5-5', content: [{ type: 'text', text }] } };
+          yield { type: 'result', subtype: 'success', is_error: false, session_id: sid, total_cost_usd: 0.001 };
+        }
+      }
+      const it = run();
+      return {
+        [Symbol.asyncIterator]: () => it,
+        interrupt: async () => {},
+        applyFlagSettings: async (s: unknown) => {
+          spawn.flags.push(s);
+        },
+        close: () => void it.return(undefined),
+      };
+    };
+    return { spawns, fn: fn as never };
+  }
+
+  const saved = [...IN_PLACE_RETRY_DELAYS_MS];
+  before(() => IN_PLACE_RETRY_DELAYS_MS.splice(0, IN_PLACE_RETRY_DELAYS_MS.length, 1, 1, 1));
+  after(() => IN_PLACE_RETRY_DELAYS_MS.splice(0, IN_PLACE_RETRY_DELAYS_MS.length, ...saved));
+
+  const base = (key: string): Message[] => [{ role: 'system', content: SYSTEM }, { role: 'user', content: `hello from ${key}` }];
+
+  it('keeps one live session per thread, with no cap and no one-shot fallback', async () => {
+    const fake = scriptedCli({});
+    __setQueryForTests(fake.fn);
+    const pool = makePool();
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const keys = Array.from({ length: 12 }, (_, i) => `conv-${i}|dev|`);
+    // All at once, as a delegate_parallel fan-out does.
+    await Promise.all(keys.map((k) => p.chat({ model: 'opus', messages: base(k), session: { key: k } })));
+    assert.equal(fake.spawns.length, 12);
+    for (const s of fake.spawns) assert.equal(s.options.maxTurns, undefined, 'a persistent session, never a one-shot');
+    const sessions = (p as unknown as { sessions: EngineSessions }).sessions;
+    assert.equal(sessions.liveCount(), 12, 'no process closed for a cap');
+    p.dispose();
+  });
+
+  it('retries a throttle on the conversation seat and resumes the same session there', async () => {
+    const pool = makePool();
+    const [a] = pool.list();
+    const fake = scriptedCli({ [pool.tokenFor(a)]: ['ok', 'throttle'] });
+    __setQueryForTests(fake.fn);
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger, sessionsDir: mkdtempSync(join(dir, 's-')) });
+    const key = 'conv-throttle|alfred|';
+    const msgs = base(key);
+    const first = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    msgs.push({ role: 'assistant', content: first.content }, { role: 'user', content: 'next' });
+    const second = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    assert.match(second.content, /^reply/);
+    assert.ok(fake.spawns.every((s) => s.seatToken === pool.tokenFor(a)), 'never moved to the other seat');
+    assert.equal(fake.spawns.length, 2, 'the throttled process is replaced by a resume');
+    assert.equal(fake.spawns[1].options.resume, 'session-1', 'same session, not a fresh one');
+    assert.equal(fake.spawns[1].options.resumeSessionAt, 'uuid-1-1');
+    assert.deepEqual(fake.spawns[1].inputs, ['User:\nnext'], 'only the delta');
+    p.dispose();
+  });
+
+  it('resumes a session whose process crashed instead of starting a fresh one', async () => {
+    const pool = makePool();
+    const [a] = pool.list();
+    const fake = scriptedCli({ [pool.tokenFor(a)]: ['ok', 'crash'] });
+    __setQueryForTests(fake.fn);
+    const p = new ClaudeCodeProvider({ config: cfg, pool, cli, logger, sessionsDir: mkdtempSync(join(dir, 's-')) });
+    const key = 'conv-crash|alfred|';
+    const msgs = base(key);
+    const first = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    msgs.push({ role: 'assistant', content: first.content }, { role: 'user', content: 'go on' });
+    const second = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    assert.match(second.content, /^reply/);
+    assert.equal(fake.spawns.length, 2);
+    assert.equal(fake.spawns[1].options.resume, 'session-1', 'the crashed session is resumed');
+    assert.deepEqual(fake.spawns[1].inputs, ['User:\ngo on']);
+    p.dispose();
+  });
+
+  it('retries a silent request on its seat, resuming the same session', async () => {
+    const pool = makePool();
+    const [a] = pool.list();
+    const fake = scriptedCli({ [pool.tokenFor(a)]: ['ok', 'silent'] });
+    __setQueryForTests(fake.fn);
+    const p = new ClaudeCodeProvider({ config: { ...cfg, requestTimeoutMs: 200 }, pool, cli, logger, sessionsDir: mkdtempSync(join(dir, 's-')) });
+    const key = 'conv-silent|alfred|';
+    const msgs = base(key);
+    const first = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    msgs.push({ role: 'assistant', content: first.content }, { role: 'user', content: 'still there?' });
+    const second = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    assert.match(second.content, /^reply/);
+    assert.ok(fake.spawns.every((s) => s.seatToken === pool.tokenFor(a)), 'never moved');
+    assert.equal(fake.spawns[1].options.resume, 'session-1');
+    assert.equal(pool.unavailableReason(a) === 'exhausted', false, 'a silent seat is never "exhausted"');
+    p.dispose();
+  });
+
+  it('applies a new effort to the live session instead of starting a process', async () => {
+    const pool = makePool();
+    const fake = scriptedCli({});
+    __setQueryForTests(fake.fn);
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const key = 'conv-effort|alfred|';
+    const msgs = base(key);
+    const first = await p.chat({ model: 'opus', messages: msgs, session: { key } });
+    msgs.push({ role: 'assistant', content: first.content }, { role: 'user', content: 'think less' });
+    await p.chat({ model: 'opus', messages: msgs, session: { key }, providerOptions: { claudeEffort: 'low' } });
+    assert.equal(fake.spawns.length, 1, 'same process');
+    assert.deepEqual(fake.spawns[0].flags, [{ effortLevel: 'low' }]);
+    p.dispose();
+  });
+
+  it('reports the seat, session mode and cache state in the response usage', async () => {
+    const pool = makePool();
+    const fake = scriptedCli({}, { cacheWrite: 50_000 });
+    __setQueryForTests(fake.fn);
+    const p = provider(pool, mkdtempSync(join(dir, 's-')));
+    const key = 'conv-usage|alfred|';
+    const res = await p.chat({ model: 'opus', messages: base(key), session: { key } });
+    const u = res.usage as Record<string, unknown>;
+    assert.equal(u.accountId, pool.list()[0].id);
+    assert.equal(u.sessionMode, 'fresh');
+    assert.equal(u.cacheWriteTokens, 50_000);
+    assert.equal(u.cacheTtlMs, CACHE_TTL_1H);
+    assert.equal(u.coldCacheReason, 'new conversation');
+    assert.ok(typeof u.servedAt === 'number' && u.servedAt > 0);
+    p.dispose();
   });
 });

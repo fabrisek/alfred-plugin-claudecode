@@ -211,13 +211,54 @@ describe('selection', () => {
     const [a, b] = pool.list();
     pool.backoff(a.id, 20_000, 'throttled');
     assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
-    assert.equal(pool.runtime(a.id).exhaustedUntil, t + 20_000);
+    // Its own state, never "exhausted": the seat keeps its quota.
+    assert.equal(pool.unavailableReason(a), 'throttled');
+    assert.equal(pool.runtime(a.id).throttledUntil, t + 20_000);
+    assert.equal(pool.runtime(a.id).exhaustedUntil, undefined);
+    assert.equal(pool.throttledFor(a.id), 20_000);
     t += 21_000;
     assert.equal(pool.pick({ model: 'opus' }).account?.id, a.id, 'back after the backoff');
     // A backoff never shortens a real quota bench.
     pool.markExhausted(a.id, t + 3_600_000, 'limit');
     pool.backoff(a.id, 20_000, 'throttled');
     assert.equal(pool.runtime(a.id).exhaustedUntil, t + 3_600_000);
+    assert.equal(pool.unavailableReason(a), 'exhausted');
+    assert.equal(pool.throttledFor(a.id), 0, 'exhausted, not merely throttled');
+  });
+
+  it('lifts an exhausted state when usage read afterwards shows headroom', () => {
+    let t = 1_000_000;
+    const pool = makePool(2, () => t);
+    const [a] = pool.list();
+    pool.markExhausted(a.id, t + 30 * 60_000, 'limit reached');
+    t += 1_000;
+    pool.setUsage(a.id, { windows: [{ key: 'five_hour', label: '5h', percent: 36, resetsAt: t + 3_600_000 }], fetchedAt: t, source: 'api' });
+    assert.equal(pool.unavailableReason(a), null, 'a seat with 64% left is not exhausted');
+    // A window at 100% keeps it out.
+    pool.markExhausted(a.id, t + 30 * 60_000, 'limit reached');
+    t += 1_000;
+    pool.setUsage(a.id, { windows: [{ key: 'five_hour', label: '5h', percent: 100, resetsAt: t + 3_600_000 }], fetchedAt: t, source: 'api' });
+    assert.equal(pool.unavailableReason(a), 'exhausted');
+    // So does an overage bench, whatever the windows read.
+    pool.clearExhausted(a.id);
+    pool.markExhausted(a.id, t + 30 * 60_000, 'plan limit reached (five_hour); extra usage is never used');
+    t += 1_000;
+    pool.setUsage(a.id, { windows: [{ key: 'five_hour', label: '5h', percent: 40, resetsAt: t + 3_600_000 }], fetchedAt: t, source: 'api' });
+    assert.equal(pool.unavailableReason(a), 'exhausted');
+  });
+
+  it('says "exhausted" only when every seat is', () => {
+    let t = 1_000_000;
+    const pool = makePool(2, () => t);
+    const [a, b] = pool.list();
+    pool.markExhausted(a.id, t + 3_600_000, 'limit');
+    pool.backoff(b.id, 20_000, 'throttled');
+    const r = pool.pick({ model: 'opus' });
+    assert.equal(r.account, undefined);
+    assert.doesNotMatch(String(r.reason), /All Claude accounts are exhausted/);
+    assert.match(String(r.reason), /Earliest back/);
+    pool.markExhausted(b.id, t + 3_600_000, 'limit');
+    assert.match(String(pool.pick({ model: 'opus' }).reason), /All Claude accounts are exhausted/);
   });
 
   it('model ids carry an optional pinned seat', () => {
@@ -364,7 +405,7 @@ describe('provider failover', () => {
     assert.equal(res.content, 'hi');
     assert.deepEqual(calls, ['tok-1', 'tok-2']);
     const first = pool.list()[0];
-    assert.equal(pool.unavailableReason(first), 'exhausted', 'benched for a while');
+    assert.equal(pool.unavailableReason(first), 'throttled', 'sits out a while, its quota intact');
     assert.equal(pool.recent[1].outcome, 'switched');
   });
 
@@ -450,8 +491,9 @@ describe('provider failover', () => {
     const res = await p.chat({ model: 'opus', messages: [{ role: 'user', content: 'x' }] });
     assert.equal(res.content, 'hi');
     assert.deepEqual(calls, ['tok-1', 'tok-2']);
-    const until = pool.runtime(pool.list()[0].id).exhaustedUntil!;
+    const until = pool.runtime(pool.list()[0].id).throttledUntil!;
     assert.ok(until > Date.now() && until <= Date.now() + 60_000, 'short backoff, not a 30 min bench');
+    assert.equal(pool.runtime(pool.list()[0].id).exhaustedUntil, undefined);
     __setQueryForTests(null);
   });
 

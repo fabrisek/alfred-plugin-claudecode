@@ -84,15 +84,23 @@ describe('drain strategy', () => {
     assert.equal(pool.pick({ model: 'opus' }).account?.id, d.id);
   });
 
-  it('keeps a running conversation on its seat while that seat is under the threshold', () => {
+  it('keeps a running conversation on its seat until that seat is really out', () => {
     const pool = makePool(2);
     const [a, b] = pool.list();
     pool.setUsage(a.id, usage(10, 4.5));
     pool.setUsage(b.id, usage(10, 0.5)); // the drain choice for a new conversation
     assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
     assert.equal(pool.pick({ model: 'opus', prefer: a.id }).account?.id, a.id, 'affinity wins');
+    // Over the threshold the seat takes no new conversation, but keeps this
+    // one: moving it would re-write it whole on the other seat.
     pool.setUsage(a.id, usage(92, 4.5));
-    assert.equal(pool.pick({ model: 'opus', prefer: a.id }).account?.id, b.id, 'over the threshold: it moves');
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, b.id);
+    assert.equal(pool.pick({ model: 'opus', prefer: a.id }).account?.id, a.id, 'over the threshold: it stays');
+    pool.backoff(a.id, 20_000, 'throttled');
+    assert.equal(pool.throttledFor(a.id) > 0, true, 'a throttle: the caller waits for the seat');
+    pool.clearExhausted(a.id);
+    pool.markExhausted(a.id, Date.now() + 3_600_000, 'limit');
+    assert.equal(pool.pick({ model: 'opus', prefer: a.id }).account?.id, b.id, 'exhausted: it moves');
   });
 
   it('picks the seat about to lose the most, on the panel data of 2026-10-09 04:00', () => {

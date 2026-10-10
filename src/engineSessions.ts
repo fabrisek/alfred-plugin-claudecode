@@ -31,10 +31,14 @@ export const ASSISTANT_SLOT = '@assistant';
 export const CACHE_TTL_5M = 5 * 60_000;
 /** One-hour prompt cache (`EV` in the CLI). */
 export const CACHE_TTL_1H = 60 * 60_000;
-/** Live CLI processes kept at once; the least recently used idle one is closed beyond. */
-export const MAX_LIVE_SESSIONS = 8;
-/** A sub-agent's process idle this long is closed (it resumes on its next request). */
-export const TASK_IDLE_MS = 2 * 60_000;
+/*
+ * No cap on live processes: every thread (conversation, agent, delegation)
+ * keeps its own. A cap used to close or bypass sessions under load, and the
+ * bypass flattened the whole history into one message, re-written in full on
+ * every request. An idle process is closed only once its seat's prompt cache
+ * has expired anyway (see EngineSessions.release), or when the CLI exits on
+ * its own.
+ */
 /**
  * A plugin unloading (reload, shutdown) lets a busy process finish its reply
  * instead of killing it mid-answer; one still busy after this is closed.
@@ -66,6 +70,14 @@ export type EngineSessionRecord = {
   currentSystem: string;
   /** Fingerprints of the non-system messages the session holds, {@link ASSISTANT_SLOT} for its replies. */
   history: string[];
+  /** Prompt size of the session's last request (input + cache read + cache write), tokens. */
+  contextTokens?: number;
+  /**
+   * Requests in a row that failed on this session before any answer (crash,
+   * silent CLI, bad resume). A failed session is resumed; when the resume
+   * fails too, the conversation starts a fresh one.
+   */
+  failures?: number;
   /**
    * The session's last reply was cut by a Stop. The host may drop that reply
    * from its history (it usually does) or keep what had streamed: both
@@ -100,7 +112,13 @@ export type EngineSessionRecord = {
 
 export type SessionPlan =
   | { kind: 'fresh'; reason: string }
-  | { kind: 'continue'; delta: Message[]; systemNote: string | null };
+  | {
+      kind: 'continue';
+      delta: Message[];
+      systemNote: string | null;
+      /** Assistant messages in the delta the session did not write (another agent, a one-shot reply). */
+      foreign: number;
+    };
 
 /**
  * Can this request continue `rec`, and with which messages?
@@ -133,10 +151,13 @@ export function planSession(
     if (!ok) return { kind: 'fresh', reason: `history diverged at message ${i}` };
   }
   const delta = msgs.slice(history.length);
-  if (delta.some((m) => m.role === 'assistant')) return { kind: 'fresh', reason: 'assistant message not produced by the session' };
+  // An assistant message the session did not write (another agent's reply in
+  // the thread, a reply served outside the session) travels in the delta as
+  // context: starting over would re-write the whole conversation for it.
+  const foreign = delta.filter((m) => m.role === 'assistant').length;
   const note = systemUpdateNote(rec.currentSystem, req.system);
   if (note === 'too-large') return { kind: 'fresh', reason: 'system prompt rewritten' };
-  return { kind: 'continue', delta, systemNote: note };
+  return { kind: 'continue', delta, systemNote: note, foreign };
 }
 
 /**
@@ -152,26 +173,83 @@ export function systemUpdateNote(prev: string, next: string): string | null | 't
   if (prev === next) return null;
   const a = prev.split('\n');
   const b = next.split('\n');
+  // Each changed region on its own: a revision line at the top of a memory
+  // file and a line near the end are two small changes, not one rewrite
+  // spanning everything between them (seen: 95k of 115k chars "changed").
+  const hunks = diffLines(a, b);
+  let changed = 0;
+  for (const h of hunks) for (const l of [...h.removed, ...h.added]) changed += l.length + 1;
+  if (changed > next.length / 2) return 'too-large';
+  const single = hunks.length === 1 ? sectionOf(b, hunks[0].at) : '';
+  const parts = [
+    `<system-update>\nYour system context changed${single ? ` in section "${single}"` : ''} since this conversation started.`,
+  ];
+  for (const h of hunks) {
+    const heading = hunks.length > 1 ? sectionOf(b, h.at) : '';
+    if (heading) parts.push(`In section "${heading}":`);
+    const removed = h.removed.join('\n');
+    const added = h.added.join('\n');
+    if (removed.trim()) parts.push(`No longer applies:\n${removed}`);
+    if (added.trim()) parts.push(`Now reads:\n${added}`);
+  }
+  parts.push('</system-update>');
+  return parts.join('\n');
+}
+
+/** Title of the markdown section line `at` belongs to, or ''. */
+function sectionOf(lines: string[], at: number): string {
+  for (let i = at - 1; i >= 0; i--) {
+    if (/^#{1,6} /.test(lines[i])) return lines[i].replace(/^#+ /, '');
+  }
+  return '';
+}
+
+/** One changed region: `removed` lines of the old text replaced by `added`, at line `at` of the new one. */
+export type LineHunk = { at: number; removed: string[]; added: string[] };
+
+/**
+ * Line diff (longest common subsequence) of two prompts, as changed regions.
+ * The common head and tail are trimmed first; the table covers the middle
+ * only. A middle too large for the table counts as one region.
+ */
+export function diffLines(a: string[], b: string[]): LineHunk[] {
   let p = 0;
   while (p < a.length && p < b.length && a[p] === b[p]) p++;
   let s = 0;
   while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
-  const removed = a.slice(p, a.length - s).join('\n');
-  const added = b.slice(p, b.length - s).join('\n');
-  if (removed.length + added.length > next.length / 2) return 'too-large';
-  let heading = '';
-  for (let i = p - 1; i >= 0; i--) {
-    if (/^#{1,6} /.test(b[i])) {
-      heading = b[i].replace(/^#+ /, '');
-      break;
+  const x = a.slice(p, a.length - s);
+  const y = b.slice(p, b.length - s);
+  if (x.length === 0 && y.length === 0) return [];
+  const n = x.length;
+  const m = y.length;
+  if (n === 0 || m === 0 || n * m > 16_000_000) return [{ at: p, removed: x, added: y }];
+  // lcs[i * w + j] = LCS length of x[i..] and y[j..].
+  const w = m + 1;
+  const lcs = new Uint32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i * w + j] = x[i] === y[j] ? lcs[(i + 1) * w + j + 1] + 1 : Math.max(lcs[(i + 1) * w + j], lcs[i * w + j + 1]);
     }
   }
-  const where = heading ? ` in section "${heading}"` : '';
-  const parts = [`<system-update>\nYour system context changed${where} since this conversation started.`];
-  if (removed.trim()) parts.push(`No longer applies:\n${removed}`);
-  if (added.trim()) parts.push(`Now reads:\n${added}`);
-  parts.push('</system-update>');
-  return parts.join('\n');
+  const hunks: LineHunk[] = [];
+  let cur: LineHunk | null = null;
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) {
+      cur = null;
+      i++;
+      j++;
+      continue;
+    }
+    if (!cur) {
+      cur = { at: p + j, removed: [], added: [] };
+      hunks.push(cur);
+    }
+    if (j < m && (i >= n || lcs[i * w + j + 1] >= lcs[(i + 1) * w + j])) cur.added.push(y[j++]);
+    else cur.removed.push(x[i++]);
+  }
+  return hunks;
 }
 
 /** Where the volatile tail of Alfred's system prompt starts (see core ProjectContextRenderer). */
@@ -255,7 +333,7 @@ export class LiveSession {
     readonly key: string,
     readonly accountId: string,
     readonly model: string,
-    readonly effort: string | null,
+    public effort: string | null,
     readonly query: LiveQuery,
     readonly input: PushQueue<unknown>,
     readonly controller: AbortController,
@@ -294,7 +372,6 @@ export class EngineSessions {
   constructor(
     private readonly dir: string,
     private readonly log: Logger,
-    private readonly maxLive = MAX_LIVE_SESSIONS,
   ) {
     mkdirSync(dir, { recursive: true });
     this.prune();
@@ -373,33 +450,35 @@ export class EngineSessions {
     return s;
   }
 
-  /** Track a new process, closing the least recently used idle ones beyond the cap. */
+  /** Track a new process. No cap: see the note on live processes at the top. */
   add(session: LiveSession): void {
     this.live.set(session.key, session);
-    const idle = [...this.live.values()].filter((s) => !s.busy && s !== session).sort((a, b) => a.lastUsed - b.lastUsed);
-    while (this.live.size > this.maxLive && idle.length > 0) {
-      const victim = idle.shift() as LiveSession;
-      this.close(victim.key, 'live-process cap');
-    }
   }
 
-  /** May a new process be started without exceeding the cap (busy ones cannot be closed)? */
+  /** May a new process be started? Only an unloading plugin refuses. */
   hasRoom(): boolean {
-    if (this.disposed) return false;
-    const busy = [...this.live.values()].filter((s) => s.busy && !s.dead).length;
-    return busy < this.maxLive;
+    return !this.disposed;
   }
 
   noteTtl(accountId: string, ttlMs: number | null): void {
     if (ttlMs) this.ttlBySeat.set(accountId, ttlMs);
   }
 
+  /**
+   * Prompt-cache TTL of a seat: what its last response reported, else one
+   * hour (subscription seats write `ephemeral_1h_input_tokens`).
+   */
   ttlFor(accountId: string): number {
-    return this.ttlBySeat.get(accountId) ?? CACHE_TTL_5M;
+    return this.ttlBySeat.get(accountId) ?? CACHE_TTL_1H;
   }
 
-  /** The request is over: close the process once the seat's prompt cache would have expired. */
-  release(session: LiveSession, opts: { task?: boolean } = {}): void {
+  /**
+   * The request is over: close the process once the seat's prompt cache has
+   * expired. Until then a live process costs only memory, and keeping it
+   * spares the next request a CLI start and a transcript load. Sub-agents
+   * too: one waiting on a long tool (a build) is not idle.
+   */
+  release(session: LiveSession, _opts: { task?: boolean } = {}): void {
     session.busy = false;
     session.lastUsed = Date.now();
     if (session.idleTimer) clearTimeout(session.idleTimer);
@@ -412,14 +491,9 @@ export class EngineSessions {
       this.closeSession(session, 'plugin stopping');
       return;
     }
-    // A sub-agent between two tool calls comes back within seconds; one that
-    // stays silent was stopped (or its parent gave up), and nothing would ever
-    // tell this process. Closing it early is free: the prompt cache lives on
-    // the server, and the next request resumes the same session.
-    const ttl = opts.task ? Math.min(TASK_IDLE_MS, this.ttlFor(session.accountId)) : this.ttlFor(session.accountId);
     session.idleTimer = setTimeout(() => {
-      if (!session.busy) this.close(session.key, opts.task ? 'sub-agent idle' : 'prompt cache expired');
-    }, ttl);
+      if (!session.busy) this.closeSession(session, 'prompt cache expired');
+    }, this.ttlFor(session.accountId));
     session.idleTimer.unref?.();
   }
 

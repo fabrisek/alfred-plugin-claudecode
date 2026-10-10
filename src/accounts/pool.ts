@@ -44,9 +44,18 @@ export type Account = {
 
 export type AccountRuntime = {
   usage?: AccountUsage;
-  /** The seat is out of quota (or rate limited) until this epoch ms. */
+  /** The seat is out of quota until this epoch ms (a real limit: rejected window, reset announced). */
   exhaustedUntil?: number;
   exhaustedReason?: string;
+  /** When {@link exhaustedUntil} was set: usage read after it may lift it (see setUsage). */
+  exhaustedAt?: number;
+  /**
+   * Short sit-out after a transient failure (bare 429, overload, a silent CLI):
+   * not a quota state. The seat is skipped by new conversations until then;
+   * a conversation already on it waits for it instead of moving.
+   */
+  throttledUntil?: number;
+  throttleReason?: string;
   /** Last auth failure seen on a real request; cleared by a successful one. */
   authFailed?: string;
   lastError?: { message: string; at: number };
@@ -448,8 +457,34 @@ export class AccountPool {
   // ---- runtime state -----------------------------------------------------
 
   setUsage(id: string, usage: AccountUsage): void {
-    this.runtime(id).usage = usage;
+    const rt = this.runtime(id);
+    rt.usage = usage;
+    this.liftIfHeadroom(id, rt);
     this.touch();
+  }
+
+  /**
+   * A seat benched as exhausted whose usage, read after the bench, shows
+   * headroom on every window is not exhausted: the bench was a guess (no reset
+   * announced) or the window already reset. Overage benches stay: the plan
+   * windows can read under 100% while extra usage is being drawn.
+   */
+  private liftIfHeadroom(id: string, rt: AccountRuntime): void {
+    const now = this.now();
+    if (!rt.exhaustedUntil || rt.exhaustedUntil <= now || !rt.usage) return;
+    if (/extra usage/i.test(rt.exhaustedReason ?? '')) return;
+    if (rt.usage.stale || rt.usage.fetchedAt < (rt.exhaustedAt ?? 0)) return;
+    const windows = rt.usage.windows.filter((w) => typeof w.percent === 'number');
+    if (windows.length === 0 || windows.some((w) => (w.percent as number) >= 100)) return;
+    this.opts.logger.info('seat usage shows headroom: exhausted state lifted', {
+      account: id,
+      was: rt.exhaustedReason,
+      until: new Date(rt.exhaustedUntil).toISOString(),
+      windows: windows.map((w) => `${w.key}=${w.percent}%`).join(' '),
+    });
+    delete rt.exhaustedUntil;
+    delete rt.exhaustedReason;
+    delete rt.exhaustedAt;
   }
 
   markUsageStale(id: string, reason: string): void {
@@ -493,27 +528,41 @@ export class AccountPool {
     const rt = this.runtime(id);
     rt.exhaustedUntil = Math.max(until, this.now() + 60_000);
     rt.exhaustedReason = reason;
+    rt.exhaustedAt = this.now();
     this.save();
   }
 
   /**
    * Short time-out after a transient throttle (bare 429 / "too many
-   * requests" without a quota rejection): the seat is skipped for `ms`, not
-   * benched until a reset that was never announced.
+   * requests" without a quota rejection, a silent CLI): the seat is skipped
+   * for `ms`, never benched as exhausted (its quota is not spent).
    */
   backoff(id: string, ms: number, reason: string): void {
     const rt = this.runtime(id);
     const until = this.now() + ms;
-    if ((rt.exhaustedUntil ?? 0) >= until) return;
-    rt.exhaustedUntil = until;
-    rt.exhaustedReason = reason;
+    if ((rt.throttledUntil ?? 0) >= until) return;
+    rt.throttledUntil = until;
+    rt.throttleReason = reason;
     this.save();
+  }
+
+  /**
+   * How long a seat that is only throttled stays out (ms); 0 when it is
+   * usable or out for another reason (exhausted, auth, disabled).
+   */
+  throttledFor(id: string, now = this.now()): number {
+    const a = this.get(id);
+    if (!a || this.unavailableReason(a, now) !== 'throttled') return 0;
+    return Math.max(0, (this.runtime(id).throttledUntil ?? now) - now);
   }
 
   clearExhausted(id: string): void {
     const rt = this.runtime(id);
     delete rt.exhaustedUntil;
     delete rt.exhaustedReason;
+    delete rt.exhaustedAt;
+    delete rt.throttledUntil;
+    delete rt.throttleReason;
     this.save();
   }
 
@@ -611,6 +660,7 @@ export class AccountPool {
     const rt = this.runtime(a.id);
     if (rt.authFailed) return `auth failed: ${rt.authFailed}`;
     if (rt.exhaustedUntil && rt.exhaustedUntil > now) return 'exhausted';
+    if (rt.throttledUntil && rt.throttledUntil > now) return 'throttled';
     return null;
   }
 
@@ -625,9 +675,11 @@ export class AccountPool {
    *   most headroom per hour left before its next reset (accounts/drain.ts);
    *   ties: the user's order. Busy seats overflow as with `fill`.
    *
-   * Either way a conversation already on a seat stays there while that seat
-   * is under the threshold (`prefer`): the strategy only picks the seat of a
-   * new conversation or session.
+   * Either way a conversation already on a seat stays there for as long as
+   * that seat can serve (`prefer`): its prompt cache lives there, and moving
+   * re-writes the whole conversation on the other account. The strategy and
+   * the threshold only pick the seat of a new conversation or session; a
+   * conversation moves only when its seat is really out (exhausted, auth).
    *
    * A pinned seat is tried first when usable; otherwise the pool takes over.
    */
@@ -644,13 +696,11 @@ export class AccountPool {
     if (usable.length === 0) return { reason: this.exhaustedMessage(args.model, exclude, now) };
 
     // Seat affinity: a conversation's prompt cache lives on the seat that
-    // served it, so it stays there while that seat is under the threshold.
-    // In-flight caps are about spreading different conversations, not this one.
+    // served it, so it stays there while that seat can serve at all. In-flight
+    // caps and the threshold are about spreading new conversations, not this one.
     if (args.prefer) {
       const sticky = usable.find((a) => a.id === args.prefer);
-      if (sticky && relevantPercent(this.runtime(sticky.id).usage, args.model, now) < threshold) {
-        return { account: sticky };
-      }
+      if (sticky) return { account: sticky };
     }
 
     const scored = usable.map((a) => ({
@@ -718,17 +768,26 @@ export class AccountPool {
     if (all.length === 0) return 'No Claude account configured. Add one in the Claude accounts page.';
     let earliest: { at: number; label: string } | null = null;
     const states: string[] = [];
+    let allExhausted = true;
     for (const a of all) {
-      const why = exclude.has(a.id) ? 'failed this request' : this.unavailableReason(a, now) ?? 'ok';
+      const out = this.unavailableReason(a, now);
+      const why = out ?? (exclude.has(a.id) ? 'failed this request' : 'ok');
       states.push(`${a.label}: ${why}`);
-      const until = this.runtime(a.id).exhaustedUntil;
+      if (a.enabled && why !== 'exhausted') allExhausted = false;
+      const rt = this.runtime(a.id);
+      const until = why === 'throttled' ? rt.throttledUntil : why === 'exhausted' ? rt.exhaustedUntil : undefined;
       if (a.enabled && until && until > now && (!earliest || until < earliest.at)) {
         earliest = { at: until, label: a.label };
       }
     }
-    const head = earliest
-      ? `All Claude accounts are exhausted for ${model}. Earliest reset: ${new Date(earliest.at).toLocaleString()} (${earliest.label}).`
-      : `No Claude account can serve ${model} right now.`;
+    // "Exhausted" only when it is true of every seat: a throttled seat, or one
+    // that failed this request, still has quota.
+    const head =
+      allExhausted && earliest
+        ? `All Claude accounts are exhausted for ${model}. Earliest reset: ${new Date(earliest.at).toISOString()} (${earliest.label}).`
+        : earliest
+          ? `No Claude account can serve ${model} right now. Earliest back: ${new Date(earliest.at).toISOString()} (${earliest.label}).`
+          : `No Claude account can serve ${model} right now.`;
     return `${head} [${states.join('; ')}]`;
   }
 

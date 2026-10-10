@@ -560,7 +560,7 @@ function activityRows(list) {
 
 // ---- seats ----------------------------------------------------------------
 
-var STATE_PILL = { ready: 'ok', 'in use': 'info', exhausted: 'warn', disabled: 'idle', 'logged out': 'err', 'auth failed': 'err' };
+var STATE_PILL = { ready: 'ok', 'in use': 'info', throttled: 'info', exhausted: 'warn', disabled: 'idle', 'logged out': 'err', 'auth failed': 'err' };
 var PLAN_SHORT = { 'Team standard': 'STD', 'Team premium': 'PRM', 'Max 20x': 'MAX', 'Max 5x': 'MAX5', Pro: 'PRO' };
 
 function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -583,6 +583,8 @@ function seatState(a) {
   var back = a.exhaustedUntil && a.exhaustedUntil > now ? a.exhaustedUntil : 0;
   full.forEach(function (w) { if (w.resetsAt > back) back = w.resetsAt; });
   if (back) return { state: 'exhausted', back: back };
+  // A short sit-out after a transient failure: the seat keeps its quota.
+  if (a.throttledUntil && a.throttledUntil > now) return { state: 'throttled', back: a.throttledUntil };
   if (a.inFlight > 0 || a.status === 'active') return { state: 'in use' };
   return { state: 'ready' };
 }
@@ -701,7 +703,7 @@ function seatRows(s) {
         + '<button data-act="toggle" data-id="' + esc(a.id) + '"' + bz('toggle') + '>' + (a.enabled ? 'Disable' : 'Enable') + '</button>'
         + (i === 0 ? '' : '<button data-act="top" data-id="' + esc(a.id) + '"' + bz('order') + '>Move to top</button>')
         + '<button data-act="pin" data-id="' + esc(a.id) + '"' + bz('pin') + '>' + (a.exposeModels ? 'Unpin models' : 'Pin models') + '</button>'
-        + (a.exhaustedUntil ? '<button data-act="clear" data-id="' + esc(a.id) + '"' + bz('clear') + ' title="Put the seat back in rotation now">Clear limit</button>' : '')
+        + (a.exhaustedUntil || a.throttledUntil ? '<button data-act="clear" data-id="' + esc(a.id) + '"' + bz('clear') + ' title="Put the seat back in rotation now">Clear limit</button>' : '')
         + '<input type="password" class="field" style="flex:1;min-width:140px" placeholder="claude setup-token (empty = use login)" id="tokv-' + esc(a.id) + '">'
         + '<button data-act="savetoken" data-id="' + esc(a.id) + '"' + bz('savetoken') + '>Save token</button>'
         + armBtn('remove', a.id, 'Remove', 'Confirm remove')

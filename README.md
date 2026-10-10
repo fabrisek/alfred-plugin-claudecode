@@ -79,14 +79,51 @@ Alfred sidebar.
 - Every request picks its seat once, synchronously, and runs its own CLI
   process: parallel conversations and `delegate_parallel` children never share
   a mutable "current account".
-- A usage-limit / rate-limit (`rate_limit_event` with `status: "rejected"`,
-  assistant `error: "rate_limit"`, or limit text) or an auth failure **before any
-  chunk was emitted** re-runs the same request on the next seat. Alfred owns
-  the conversation and resends it whole each turn, so nothing is lost. The seat
-  is marked exhausted until its reset time.
+- **Seat affinity**: a conversation thread (conversation, agent, delegation)
+  stays on the seat that served it for its whole life, whatever the strategy
+  and the threshold: its prompt cache lives there, and a move re-writes the
+  whole conversation into the other account's cache. The strategy only places
+  new threads, which is what spreads a fan-out over the seats.
+- A thread moves only when its seat is **really out**: a usage limit
+  (`rate_limit_event` with `status: "rejected"`, limit text, a reset time) or
+  an auth failure, before any chunk was emitted. The seat is marked exhausted
+  until its reset. The move is logged (`moving the conversation to another
+  seat`) with the thread's context size, i.e. the tokens re-written.
+- A **transient** failure (bare 429, overload, a CLI silent past its budget) is
+  retried on the same seat, resuming the same session (5 s, 20 s, 60 s; once
+  for a silent CLI), and only then moves. The seat gets a short `throttled`
+  state (its own, never "exhausted": its quota is intact); a thread whose seat
+  is throttled waits for it (up to 90 s) instead of moving. A request silent
+  on two seats fails instead of rotating further.
+- An exhausted seat whose usage, read afterwards, shows headroom on every
+  window is put back at once (overage benches excepted). A seat's usage is
+  read again as soon as its bench ends.
 - After a chunk was emitted the request is not replayed: the error names the
-  seat and its reset time. When every seat is exhausted the error gives the
-  earliest reset.
+  seat and its reset time (ISO). "All Claude accounts are exhausted" only when
+  every seat is; otherwise the error gives the earliest one back.
+
+### Engine sessions (one CLI session per thread)
+
+- No cap on live processes and no one-shot fallback: every thread keeps its
+  CLI process, which is closed only once the seat's prompt cache has expired
+  (the TTL the API reports, 1 h on subscription seats), or when the CLI exits.
+  A closed session is resumed (`--resume`) on the same seat: still warm within
+  the TTL.
+- A process that crashed or stayed silent is resumed, not replaced by a fresh
+  session; only a resume that fails too starts over.
+- A changed thinking mode is applied to the live process (`applyFlagSettings`);
+  a live process keeps the advisor it started with. A new process gets no
+  advisor above *Advisor up to* tokens (default 150k).
+- Assistant messages the session did not write (another agent's reply in the
+  thread) go in the delta as context instead of restarting the session; a
+  system prompt change is sent as a `<system-update>` of the changed lines only.
+- The time-to-first-output budget grows with the prompt
+  (`Deadline.prefillBudgetMs`) and restarts on every sign of life (CLI init,
+  API message start, rate-limit event), which also emits a `prompt_processing`
+  heartbeat to the host.
+- Each response's `usage` carries `accountId`, `sessionMode`
+  (fresh / resume / continue / one-shot), `cacheWriteTokens`, `cacheTtlMs`,
+  `servedAt` and, when the call re-wrote most of the prompt, `coldCacheReason`.
 
 ### Usage reading (verified 2026-10-08 on a Team seat, CLI 2.1.280)
 

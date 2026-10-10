@@ -21,6 +21,7 @@ import { markerNotes } from './hostCutNote.js';
 import { coerceNativeArgs } from './nativeArgs.js';
 import {
   ASSISTANT_SLOT,
+  CACHE_TTL_1H,
   cacheTtlOf,
   EngineSessions,
   LiveSession,
@@ -37,6 +38,28 @@ const LABEL = 'Claude Code';
 
 /** A seat whose CLI said nothing within the request timeout sits out this long. */
 const SILENT_SEAT_BACKOFF_MS = 5 * 60_000;
+
+/**
+ * Waits before retrying a conversation's request on its own seat after a
+ * transient failure (bare 429, overload), before moving it: a move re-writes
+ * the whole conversation into the other account's prompt cache.
+ */
+export const IN_PLACE_RETRY_DELAYS_MS = [5_000, 20_000, 60_000];
+/** A silent CLI (nothing within the request timeout) is retried this many times on its seat. */
+const SILENT_IN_PLACE_RETRIES = 1;
+/** Longest a conversation waits for its own seat to come back from a throttle instead of moving. */
+const MAX_STICKY_WAIT_MS = 90_000;
+/**
+ * Seats on which a request may stay silent (nothing within its budget) before
+ * it fails: a conversation that is silent on two seats is not a seat problem,
+ * and rotating it further re-writes it on every seat it lands on (seen: 9
+ * seats in a row, one every two minutes).
+ */
+const MAX_SILENT_SEATS = 2;
+/** Above this prompt size a newly started process gets no advisor (it re-reads the whole context uncached). */
+export const DEFAULT_ADVISOR_MAX_CONTEXT_TOKENS = 150_000;
+/** Characters per token for the prompt size estimate when no measured size is known. */
+const CHARS_PER_TOKEN = 3.5;
 
 /** Effort sent when the conversation has no thinking mode of its own. */
 export const DEFAULT_EFFORT = 'high';
@@ -67,6 +90,12 @@ export type ClaudeCodeConfig = {
   maxConcurrentRequests: number;
   /** Sub-agents one `delegate_parallel` call may fan out to. */
   maxParallelTasks: number;
+  /**
+   * A process started for a prompt above this many tokens runs without the
+   * advisor (it re-reads the whole context, uncached, on every consult).
+   * Default {@link DEFAULT_ADVISOR_MAX_CONTEXT_TOKENS}; 0 = no limit.
+   */
+  advisorMaxContextTokens?: number;
 };
 
 export type ClaudeCodeProviderOptions = {
@@ -280,6 +309,8 @@ export class AccountFailure extends Error {
     readonly kind: FailureKind,
     readonly account: Account,
     readonly resetsAt: number | null,
+    /** The CLI said nothing within the request timeout (a `throttle` of its own kind). */
+    readonly silent = false,
   ) {
     super(message);
     this.name = 'AccountFailure';
@@ -363,9 +394,10 @@ export class ClaudeCodeProvider implements LLMProvider {
       accounts: this.opts.pool.list().length,
       cli: `${this.opts.cli.source}${this.opts.cli.path ? ` (${this.opts.cli.path})` : ''}`,
       requestTimeoutMs: timeout,
-      // A request may try several seats before one answers (each refused
-      // quickly in practice); give the host room for a couple of full attempts.
-      streamFirstChunkTimeoutMs: Math.min(15 * 60_000, timeout * 3),
+      // A request may wait for its seat, retry there, then try another seat,
+      // and a large conversation takes minutes to its first token (the
+      // plugin's own budget scales with the prompt): the host's ceiling.
+      streamFirstChunkTimeoutMs: Math.max(15 * 60_000, timeout),
 
       // ---- declared traits -------------------------------------------------
       // The whole toolset is rendered into the prompt on every turn (this
@@ -467,42 +499,109 @@ export class ClaudeCodeProvider implements LLMProvider {
     const tried = new Set<string>();
     const agent = req.metadata?.agentId;
     // One Claude Code session per conversation: its prompt cache lives on the
-    // seat that served it, so the conversation stays there while it can.
+    // seat that served it, so the conversation stays there for its whole life
+    // and moves only when that seat is really out (accounts/pool.ts `pick`).
     const sessionKey = this.sessions ? EngineSessions.keyOf(req) : null;
-    const prefer = sessionKey ? this.sessions?.record(sessionKey)?.accountId : undefined;
+    const rec = sessionKey ? this.sessions?.record(sessionKey) : undefined;
+    const prefer = rec?.accountId;
+    // What moving this conversation would re-write on the other seat.
+    const contextTokens = rec?.contextTokens ?? estimatePromptTokens(built);
+    const pool = this.opts.pool;
+    // Seats this request was silent on (see MAX_SILENT_SEATS).
+    let silentSeats = 0;
 
     for (;;) {
       if (req.signal?.aborted) throw abortError();
-      const pick = this.opts.pool.pick({ model, pinned, exclude: tried, prefer });
+      if (sessionKey && prefer && !tried.has(prefer)) {
+        // Its seat only sits out a throttle: wait for it rather than move.
+        const wait = pool.throttledFor(prefer);
+        if (wait > 0 && wait <= MAX_STICKY_WAIT_MS) {
+          this.log.info('waiting for the conversation seat to come back from a throttle', {
+            thread: sessionKey,
+            account: prefer,
+            waitMs: wait,
+          });
+          await sleepAbortable(wait, req.signal);
+          if (req.signal?.aborted) throw abortError();
+        }
+      }
+      const pick = pool.pick({ model, pinned, exclude: tried, prefer });
       if (!pick.account) throw new Error(`${LABEL}: ${pick.reason}`);
       const account = pick.account;
+      if (sessionKey && prefer && account.id !== prefer) {
+        const owner = pool.get(prefer);
+        this.log.warn('moving the conversation to another seat', {
+          thread: sessionKey,
+          from: prefer,
+          to: account.id,
+          why: tried.has(prefer) ? 'failed this request' : owner ? pool.unavailableReason(owner) ?? 'unknown' : 'seat removed',
+          contextTokens,
+          // Every token of it is written again into the new seat's cache.
+          estimatedCacheWriteTokens: contextTokens,
+        });
+      }
       tried.add(account.id);
 
-      let emitted = false;
-      try {
-        for await (const chunk of this.attempt(req, model, built, account, agent, sessionKey)) {
-          if (chunk.type !== 'done') emitted = true;
-          yield chunk;
-        }
-        return;
-      } catch (err) {
-        if (err instanceof AccountFailure) {
-          if (err.switchable && !emitted) {
-            this.log.warn('switching Claude account', {
-              from: account.id,
-              kind: err.kind,
-              resetsAt: err.resetsAt ? new Date(err.resetsAt).toISOString() : undefined,
-            });
-            continue;
+      let retries = 0;
+      for (;;) {
+        let emitted = false;
+        try {
+          for await (const chunk of this.attempt(req, model, built, account, agent, sessionKey)) {
+            // Prefill progress is a heartbeat, not part of the answer: the
+            // request can still be retried or moved after it.
+            if (chunk.type !== 'done' && chunk.type !== 'prompt_processing') emitted = true;
+            yield chunk;
           }
-          const reset = err.resetsAt ? ` (resets ${new Date(err.resetsAt).toLocaleString()})` : '';
-          throw new Error(
-            emitted
-              ? `${LABEL} account "${account.label}" failed mid-answer${reset}: ${err.message}. The partial answer is incomplete; send again to continue on another account.`
-              : `${LABEL} account "${account.label}"${reset}: ${err.message}`,
-          );
+          return;
+        } catch (err) {
+          if (err instanceof AccountFailure) {
+            if (err.switchable && !emitted) {
+              // A transient failure (429, overload, a silent CLI) on a
+              // conversation's seat is retried there first: the seat still
+              // has its quota and the conversation's cache.
+              const budget = err.silent ? SILENT_IN_PLACE_RETRIES : IN_PLACE_RETRY_DELAYS_MS.length;
+              if (sessionKey && err.kind === 'throttle' && retries < budget && !req.signal?.aborted) {
+                const delay = IN_PLACE_RETRY_DELAYS_MS[Math.min(retries, IN_PLACE_RETRY_DELAYS_MS.length - 1)];
+                retries++;
+                this.log.warn('transient failure: retrying on the same seat', {
+                  thread: sessionKey,
+                  account: account.id,
+                  attempt: retries,
+                  delayMs: delay,
+                  silent: err.silent,
+                  detail: err.message.slice(0, 160),
+                });
+                await sleepAbortable(delay, req.signal);
+                if (req.signal?.aborted) throw abortError();
+                continue;
+              }
+              if (err.silent && ++silentSeats >= MAX_SILENT_SEATS) {
+                throw new Error(
+                  `${LABEL}: no output on ${silentSeats} seats in a row (last: "${account.label}", ${err.message}). ` +
+                    'Not moved further: each move re-writes the whole conversation on another seat.',
+                );
+              }
+              this.log.warn('switching Claude account', {
+                from: account.id,
+                kind: err.kind,
+                silent: err.silent || undefined,
+                resetsAt: err.resetsAt ? new Date(err.resetsAt).toISOString() : undefined,
+                thread: sessionKey ?? undefined,
+                retriesOnSeat: retries,
+                contextTokens: sessionKey ? contextTokens : undefined,
+              });
+              break;
+            }
+            // ISO: the host's auto-resume reads the reset time from the message.
+            const reset = err.resetsAt ? ` (resets ${new Date(err.resetsAt).toISOString()})` : '';
+            throw new Error(
+              emitted
+                ? `${LABEL} account "${account.label}" failed mid-answer${reset}: ${err.message}. The partial answer is incomplete; send again to continue on another account.`
+                : `${LABEL} account "${account.label}"${reset}: ${err.message}`,
+            );
+          }
+          throw err;
         }
-        throw err;
       }
     }
   }
@@ -547,13 +646,24 @@ export class ClaudeCodeProvider implements LLMProvider {
         return;
       }
       if (!(err instanceof SessionLost)) throw err;
-      // The failed attempt dropped the session and left a tombstone, so this
-      // retry starts a fresh one and tells the model why (hostCutNote.ts).
-      this.log.warn('Claude engine session lost before any answer text; retrying once on a fresh session', {
+      // The process died before any answer text. Its session is kept and
+      // resumed first (same seat, same cache); a resume that dies too gives
+      // up on it, leaves a tombstone, and the last try starts a fresh session
+      // that is told why (hostCutNote.ts).
+      this.log.warn('Claude engine session lost before any answer text; resuming it', {
         account: account.id,
         detail: err.message.slice(0, 200),
       });
-      yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
+      try {
+        yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
+      } catch (again) {
+        if (!(again instanceof SessionLost)) throw again;
+        this.log.warn('resume failed too; retrying once on a fresh session', {
+          account: account.id,
+          detail: again.message.slice(0, 200),
+        });
+        yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
+      }
     }
   }
 
@@ -573,7 +683,17 @@ export class ClaudeCodeProvider implements LLMProvider {
     // its own controller. `Deadline` composes the caller's signal with our
     // time-to-first-chunk budget and detaches from `req.signal` on dispose.
     const controller = new AbortController();
-    const deadline = new Deadline(req.signal, this.opts.config.requestTimeoutMs, LABEL);
+    // Prompt size of this request: measured on the session's last request,
+    // else estimated. Scales the time-to-first-output budget and gates the
+    // advisor.
+    const knownRecord = sessionKey && sessions ? sessions.record(sessionKey) : undefined;
+    const contextTokens = knownRecord?.contextTokens ?? estimatePromptTokens(built);
+    // A 700k-token conversation takes minutes to its first token: the budget
+    // grows with the prompt (Deadline.prefillBudgetMs), and every sign of life
+    // before the first token (CLI init, API message start, rate-limit
+    // headers) restarts it.
+    const timeoutMs = Deadline.prefillBudgetMs(this.opts.config.requestTimeoutMs, contextTokens);
+    const deadline = new Deadline(req.signal, timeoutMs, LABEL);
 
     const options: QueryOptions = {
       model,
@@ -623,9 +743,14 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
     // The server-side advisor: conversations the user talks to (advisorScope),
     // unless refused by the API on this seat.
-    const advisorSettings = this.opts.advisor?.settingsFor(account.id, engineThread(req));
+    const advisorLimit = this.opts.config.advisorMaxContextTokens ?? DEFAULT_ADVISOR_MAX_CONTEXT_TOKENS;
+    // A large conversation gets no advisor on a new process: each consult
+    // re-reads the whole context, uncached. A live process keeps the one it
+    // was launched with (relaunching it would re-write the cached prefix).
+    const advisorTooLarge = advisorLimit > 0 && contextTokens > advisorLimit;
+    const advisorSettings = advisorTooLarge ? undefined : this.opts.advisor?.settingsFor(account.id, engineThread(req));
     if (advisorSettings) options.settings = advisorSettings;
-    const advisorModel = advisorSettings?.advisorModel;
+    let advisorModel = advisorSettings?.advisorModel;
 
     // ---- persistent session: which process, and what to send it ----------
     // Only with the native CLI: `--tools ""` guarantees a user message gets a
@@ -639,10 +764,20 @@ export class ClaudeCodeProvider implements LLMProvider {
     // What was on disk for this conversation before this request (a tombstone
     // when its last process died).
     const previous = sessionKey && sessions ? sessions.record(sessionKey) : undefined;
+    // When this thread last ran a request (its cache is warm within the TTL).
+    const previousTurnAt = previous?.sessionId ? previous.updatedAt : undefined;
+    const previousSeat = previous?.accountId;
     // An unloading plugin starts no process: it only drains the busy ones.
     if (sessionKey && sessions && this.opts.cli.native && !sessions.disposing) {
       const existing = sessions.getLive(sessionKey);
-      if (!existing?.busy) {
+      if (existing?.busy) {
+        // Two requests at once on one thread cannot share its process.
+        this.log.warn('thread already has a request running: this one is served outside its session', {
+          thread: sessionKey,
+          account: account.id,
+          contextTokens,
+        });
+      } else {
         const plan = planSession(sessions.record(sessionKey), {
           accountId: account.id,
           system: built.systemPrompt,
@@ -652,18 +787,36 @@ export class ClaudeCodeProvider implements LLMProvider {
         if (plan.kind === 'continue') {
           record = sessions.record(sessionKey) as EngineSessionRecord;
           const delta = buildPrompt(plan.delta).content;
-          content = plan.systemNote ? [{ type: 'text', text: plan.systemNote }, ...delta] : delta;
-          const reusable =
-            existing &&
-            existing.accountId === account.id &&
-            existing.model === model &&
-            existing.effort === effort &&
-            existing.advisor === advisorModel;
-          if (reusable) {
+          const lead: SdkInputBlock[] = [];
+          if (plan.systemNote) lead.push({ type: 'text', text: plan.systemNote });
+          if (plan.foreign > 0) lead.push({ type: 'text', text: foreignRepliesNote(plan.foreign) });
+          content = [...lead, ...delta];
+          if (plan.foreign > 0) this.log.info('replies written outside the session sent as context', { thread: sessionKey, count: plan.foreign });
+          // Same seat and model: the live process serves it. A new effort is
+          // applied to it in place; the advisor it was launched with stays.
+          let reusable = !!existing && existing.accountId === account.id && existing.model === model;
+          if (reusable && existing && existing.effort !== effort) {
+            // Held while the CLI applies it: no other request may take it.
+            existing.busy = true;
+            reusable = await applyEffort(existing, effort);
+            existing.busy = false;
+            this.log.info(reusable ? 'effort changed on the live session' : 'effort change needs a new process', {
+              thread: sessionKey,
+              from: existing.effort,
+              to: effort,
+            });
+          }
+          if (reusable && existing) {
             live = existing;
             sessionMode = 'continue';
+            advisorModel = existing.advisor;
           } else {
-            if (existing) sessions.close(sessionKey, 'model, effort, advisor or seat changed');
+            if (existing) {
+              const why =
+                existing.accountId !== account.id ? 'seat changed' : existing.model !== model ? 'model changed' : 'effort changed';
+              // Same session, resumed by a new process (`--resume`).
+              sessions.closeSession(existing, `${why}; the session is resumed`);
+            }
             sessionMode = 'resume';
           }
         } else {
@@ -681,12 +834,6 @@ export class ClaudeCodeProvider implements LLMProvider {
             updatedAt: Date.now(),
           };
           sessionMode = 'fresh';
-        }
-        if (!live && !sessions.hasRoom()) {
-          // Every live process is mid-request: serve this one statelessly.
-          sessionMode = 'one-shot';
-          content = fullContent();
-          record = undefined;
         }
       }
     }
@@ -711,11 +858,13 @@ export class ClaudeCodeProvider implements LLMProvider {
         // have left its delta (or an API error) in the transcript.
         if (record.lastUuid) sessionOptions.resumeSessionAt = record.lastUuid;
         if (record.accountId !== account.id) {
-          this.log.info('continuing the Claude session on another seat', {
+          this.log.warn('continuing the Claude session on another seat', {
             thread: sessionKey,
             from: record.accountId,
             to: account.id,
             sessionId: record.sessionId,
+            // Written again in full into the new seat's prompt cache.
+            contextTokens,
           });
         }
       }
@@ -726,6 +875,17 @@ export class ClaudeCodeProvider implements LLMProvider {
       sessions.add(live);
     }
     if (live) live.busy = true;
+    // Why this request may re-write the conversation into the prompt cache
+    // (null = it should read it). Checked against the measured usage below.
+    const ttl = sessions?.ttlFor(account.id) ?? CACHE_TTL_1H;
+    const expectedCold = coldReason({
+      mode: sessionMode,
+      planReason,
+      seatChanged: !!previousSeat && previousSeat !== account.id && sessionMode !== 'fresh',
+      idleMs: previousTurnAt !== undefined ? Date.now() - previousTurnAt : undefined,
+      ttlMs: ttl,
+      keyed: !!sessionKey,
+    });
 
     // Stop / time-to-first-chunk. A one-shot process is killed; a persistent
     // one is interrupted on Stop (the session lives on) and closed on a
@@ -768,6 +928,9 @@ export class ClaudeCodeProvider implements LLMProvider {
       thread: sessionKey,
       task: req.session?.task ?? false,
       sentBlocks: content.length,
+      contextTokens,
+      timeoutMs,
+      ...(expectedCold ? { expectedCold } : {}),
     });
 
     let assembledContent = '';
@@ -809,15 +972,27 @@ export class ClaudeCodeProvider implements LLMProvider {
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
     // The seat failed (limit, throttle, auth), not the session.
     let seatFailed = false;
+    // ...and only for a moment (429, overload): it is retried on this seat.
+    let throttled = false;
     // Transcript uuid of this reply's last assistant entry.
     let replyUuid: string | undefined;
+    // Nothing came back within the time-to-first-output budget: the session
+    // is not at fault, it is resumed as is.
+    let silent = false;
 
-    const buildResponse = (): ChatResponse => ({
-      content: assembledContent.trim(),
-      thinking: assembledThinking.trim() || undefined,
-      finishReason,
-      usage: servedModel ? { ...usage, servedModel } : usage,
-    });
+    // Session and prompt-cache facts of this request, for the host UI.
+    let servedInfo: ProviderSessionInfo | undefined;
+    const buildResponse = (): ChatResponse => {
+      const base = servedModel ? { ...usage, servedModel } : usage;
+      return {
+        content: assembledContent.trim(),
+        thinking: assembledThinking.trim() || undefined,
+        finishReason,
+        // Session and cache facts, under the `MessageUsage` names the UI reads
+        // (context meter, cold-cache warning).
+        usage: servedInfo ? { ...base, ...usageFields(servedInfo) } : base,
+      };
+    };
     // The API refused the advisor before anything was produced: the caller
     // replays the request on this same seat without it.
     const advisorRefusal = (detail: string): AdvisorRefused | null => {
@@ -829,6 +1004,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     const fail = (detail: string): AccountFailure => {
       const c = classifyFailure(detail, sdkError, rejectedUntil);
       seatFailed = c.kind === 'limit' || c.kind === 'throttle' || c.kind === 'auth';
+      throttled = c.kind === 'throttle';
       if (c.kind === 'limit') {
         const until =
           c.resetsAt ?? pool.runtime(account.id).exhaustedUntil ?? Date.now() + 30 * 60_000;
@@ -861,7 +1037,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             // Our own timeout closed it: fail like a silent seat (catch below),
             // never end the turn on an empty reply.
             if (requestAborted && !deadline.userAborted) {
-              throw new Error(`no output within ${this.opts.config.requestTimeoutMs}ms`);
+              throw new Error(`no output within ${timeoutMs}ms`);
             }
             if (!requestAborted) {
               throw new Error(
@@ -885,9 +1061,17 @@ export class ClaudeCodeProvider implements LLMProvider {
         // Diagnostics for error_max_turns: what the CLI exposed and what the
         // model tried to call.
         const probe = message as { type: string; subtype?: string; tools?: string[]; model?: string; message?: { content?: { type: string; name?: string }[] } };
-        if (probe.type === 'system' && probe.subtype === 'init') {
-          initTools = probe.tools ?? [];
-          if (typeof probe.model === 'string' && probe.model) servedModel = probe.model;
+        if (probe.type === 'system') {
+          // The CLI is alive and working on it: the silence budget starts over.
+          deadline.rearmTimeout();
+          if (probe.subtype === 'init') {
+            initTools = probe.tools ?? [];
+            if (typeof probe.model === 'string' && probe.model) servedModel = probe.model;
+            if (!sawStreamedText && !assembledThinking) {
+              // Heartbeat for the host's own first-chunk timer, not an answer.
+              yield { type: 'prompt_processing', nTokens: contextTokens, progress: 0 };
+            }
+          }
         }
         if (probe.type === 'assistant') {
           for (const b of probe.message?.content ?? []) if (b.type === 'tool_use' && b.name) toolUses.push(b.name);
@@ -897,6 +1081,8 @@ export class ClaudeCodeProvider implements LLMProvider {
           // a discriminant check does not narrow on its own.
           const { event } = message as Extract<SdkMessage, { type: 'stream_event' }>;
           if (event.type === 'message_start') {
+            // The API accepted the request: alive, the budget starts over.
+            deadline.rearmTimeout();
             // Input side of the request, known before any output: a reply cut
             // after its tool call never reaches `result`, and was missing from
             // the seat's token accounting.
@@ -905,6 +1091,9 @@ export class ClaudeCodeProvider implements LLMProvider {
               usage = mergeUsage(usage, startUsage);
               stepUsage = { ...startUsage };
               sessions?.noteTtl(account.id, cacheTtlOf(startUsage));
+              if (!sawStreamedText && !assembledThinking) {
+                yield { type: 'prompt_processing', nTokens: promptTokensOf(startUsage), progress: 0 };
+              }
             }
           } else if (event.type === 'content_block_delta' && 'delta' in event && event.delta) {
             const delta = event.delta as SdkContentDelta;
@@ -951,6 +1140,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             break;
           }
         } else if (message.type === 'rate_limit_event') {
+          deadline.rearmTimeout();
           const info = (message as Extract<SdkMessage, { type: 'rate_limit_event' }>).rate_limit_info;
           if (info) {
             const until = pool.applyRateLimit(account.id, info);
@@ -1114,15 +1304,19 @@ export class ClaudeCodeProvider implements LLMProvider {
           // silent seat (seen right after a window reset) is benched for a
           // few minutes and the next seat gets the request, instead of the
           // whole turn failing after the wait.
-          const detail = `no output within ${this.opts.config.requestTimeoutMs}ms`;
+          const detail = `no output within ${timeoutMs}ms`;
           failed = { outcome: 'switched', detail };
-          pool.backoff(account.id, SILENT_SEAT_BACKOFF_MS, `silent: ${detail}`);
+          silent = true;
+          // A one-off request moves on at once; a conversation is retried on
+          // its seat first (stream()), so the seat is benched only for others.
+          pool.backoff(account.id, sessionKey ? THROTTLE_BACKOFF_MS : SILENT_SEAT_BACKOFF_MS, `silent: ${detail}`);
           throw new AccountFailure(
-            `${LABEL} produced nothing within ${this.opts.config.requestTimeoutMs}ms on account "${account.label}". ` +
+            `${LABEL} produced nothing within ${timeoutMs}ms on account "${account.label}". ` +
               `Check that the \`claude\` CLI is installed and that account is logged in (Claude accounts page).`,
             'throttle',
             account,
             null,
+            true,
           );
         }
         yield { type: 'done', response: buildResponse() };
@@ -1159,9 +1353,10 @@ export class ClaudeCodeProvider implements LLMProvider {
           // The process goes (it was launched with the advisor), the session
           // stays: the replay without the advisor resumes it at the last reply.
           sessions.closeSession(live, 'advisor refused by the API');
-        } else if (failed && seatFailed && persistent && record.sessionId && (this.opts.crossSeat?.() ?? false)) {
-          // The seat is out, not the session: the next seat resumes it at the
-          // last reply Alfred kept and sends this request's delta again.
+        } else if (failed && seatFailed && persistent && record.sessionId && (throttled || (this.opts.crossSeat?.() ?? false))) {
+          // The seat is out, not the session: the retry on this seat (a
+          // throttle) or the next seat resumes it at the last reply Alfred
+          // kept and sends this request's delta again.
           sessions.closeSession(live, `seat failed: ${failed.detail.slice(0, 120)}`);
         } else if (!failed && userStopped && (!gotResult || !replyUuid)) {
           // Stopped before the CLI settled: the process goes, the session
@@ -1171,12 +1366,30 @@ export class ClaudeCodeProvider implements LLMProvider {
           // moved on differently.
           // (Or it settled with nothing of the reply in the transcript.)
           sessions.closeSession(live, 'stopped before the reply settled');
-        } else if (failed || !gotResult) {
-          // Unknown state: the next request starts a fresh session. A process
-          // that died leaves a tombstone so that session is told why.
+        } else if (silent && record.sessionId && sessionMode !== 'fresh') {
+          // Silent, not broken: the next try resumes the same session at the
+          // last reply Alfred kept.
+          sessions.closeSession(live, `request failed: ${failed?.detail.slice(0, 120) ?? 'silent'}`);
+        } else if ((failed && !seatFailed) || !gotResult) {
           sessions.closeSession(live, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
-          if (failed && !seatFailed) sessions.markLost(live.key, account.id, failed.detail);
-          else sessions.forget(live.key);
+          if (record.sessionId && sessionMode !== 'fresh' && (record.failures ?? 0) < 1) {
+            // The process went away (crash, kill): its session is resumed once
+            // (`--resume` at the last reply kept, same seat, cache still warm)
+            // before the conversation gives up on it.
+            record.failures = (record.failures ?? 0) + 1;
+            sessions.save(record);
+            this.log.info('engine session kept for a resume after a failed request', { thread: live.key, sessionId: record.sessionId });
+          } else if (failed) {
+            // A resume that failed too: the next request starts a fresh
+            // session, told why by the tombstone.
+            sessions.markLost(live.key, account.id, failed.detail);
+          } else {
+            sessions.forget(live.key);
+          }
+        } else if (failed) {
+          // The seat failed and the session cannot follow to another one.
+          sessions.closeSession(live, `request failed: ${failed.detail.slice(0, 120)}`);
+          sessions.forget(live.key);
         } else {
           record.sessionId = sessionId ?? record.sessionId;
           record.accountId = account.id;
@@ -1191,6 +1404,9 @@ export class ClaudeCodeProvider implements LLMProvider {
           // The notes went out with this request (hostCutNote.ts).
           record.markersExplained = true;
           delete record.lostReason;
+          delete record.failures;
+          const measured = promptTokensOf(stepUsage);
+          if (measured > 0) record.contextTokens = measured;
           sessions.save(record);
           const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0;
           if (req.session?.task && (requestAborted || !calledTool || TASK_END_CALL.test(rawText))) {
@@ -1215,14 +1431,29 @@ export class ClaudeCodeProvider implements LLMProvider {
         };
       }
       if (!failed) {
+        servedInfo = sessionInfo({
+          account,
+          mode: sessionMode,
+          usage: stepUsage,
+          expectedCold,
+          previousTurnAt,
+          ttlMs: cacheTtlOf(stepUsage) ?? ttl,
+          thread: sessionKey,
+        });
         this.log.info('stream served', {
           model,
           servedModel,
           account: account.id,
           session: sessionMode,
           sessionId,
-          cacheRead: stepUsage?.cache_read_input_tokens,
-          cacheWrite: stepUsage?.cache_creation_input_tokens,
+          thread: sessionKey,
+          input: servedInfo.input,
+          output: servedInfo.output,
+          cacheRead: servedInfo.cacheRead,
+          cacheWrite: servedInfo.cacheWrite,
+          contextTokens: servedInfo.contextTokens,
+          cold: servedInfo.cold,
+          previousTurnAt: previousTurnAt ? new Date(previousTurnAt).toISOString() : undefined,
         });
       }
       pool.end(account.id, {
@@ -1337,6 +1568,163 @@ function renderNativeCalls(calls: Array<{ name: string; input?: unknown }>): str
   return calls
     .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: coerceNativeArgs(c.input) })}\n</tool_call>`)
     .join('');
+}
+
+/**
+ * Session and prompt-cache facts of one served request: logged with `stream
+ * served`, and sent to the host in `usage` under the `MessageUsage` names
+ * (see {@link usageFields}).
+ */
+export type ProviderSessionInfo = {
+  provider: 'claude-code';
+  /** Seat that served the request. */
+  account: string;
+  accountLabel: string;
+  /** fresh = new CLI session; resume = new process on the existing session; continue = live process; one-shot = no session. */
+  mode: 'fresh' | 'resume' | 'continue' | 'one-shot';
+  /** Uncached prompt tokens (after the last cache breakpoint). */
+  input: number;
+  /** Prompt tokens read from the cache. */
+  cacheRead: number;
+  /** Prompt tokens written into the cache by this request. */
+  cacheWrite: number;
+  output: number;
+  /** input + cacheRead + cacheWrite: the conversation's size as the model saw it. */
+  contextTokens: number;
+  /**
+   * Set when this request re-wrote most of the conversation into the cache:
+   * why (`new conversation`, `prompt cache expired`, `seat switch a -> b`,
+   * `new session: <reason>`, `one-shot request`), with the tokens written.
+   */
+  cold: { reason: string; tokens: number } | null;
+  /** When the thread's previous request ran (epoch ms), if known. */
+  previousTurnAt: number | null;
+  /** When this request finished (epoch ms). */
+  at: number;
+  /** Prompt-cache lifetime of the seat: the cache is warm until at + cacheTtlMs. */
+  cacheTtlMs: number;
+};
+
+/** The `MessageUsage` fields the host UI reads for the session and cache state. */
+function usageFields(info: ProviderSessionInfo): {
+  cacheWriteTokens: number;
+  cacheTtlMs: number;
+  accountId: string;
+  sessionMode: string;
+  coldCacheReason?: string;
+  servedAt: number;
+} {
+  return {
+    cacheWriteTokens: info.cacheWrite,
+    cacheTtlMs: info.cacheTtlMs,
+    accountId: info.account,
+    sessionMode: info.mode,
+    ...(info.cold ? { coldCacheReason: info.cold.reason } : {}),
+    servedAt: info.at,
+  };
+}
+
+/** Prompt size of one API message's usage: input + cache read + cache write. */
+function promptTokensOf(u: SdkUsage | undefined): number {
+  if (!u) return 0;
+  return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+}
+
+/** Rough prompt size when nothing was measured: characters of the built prompt. */
+export function estimatePromptTokens(built: BuiltPrompt): number {
+  let chars = built.systemPrompt.length;
+  for (const b of built.content) if (b.type === 'text') chars += b.text.length;
+  return Math.round(chars / CHARS_PER_TOKEN) + built.images * 1_500;
+}
+
+/** Waits `ms`, or less when `signal` aborts first. Never throws. */
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Note ahead of a delta that carries assistant messages the session did not write. */
+function foreignRepliesNote(count: number): string {
+  return (
+    `[Host note: ${count === 1 ? 'the Assistant message' : `the ${count} Assistant messages`} below ` +
+    'were written outside this session (another agent of the conversation, or a reply served separately). ' +
+    'They are part of the conversation: take them into account.]'
+  );
+}
+
+/**
+ * Apply a new effort to a live process (`applyFlagSettings`), so a changed
+ * thinking mode does not cost a new process. False when the CLI refused it.
+ */
+async function applyEffort(live: LiveSession, effort: string | null): Promise<boolean> {
+  const apply = (live.query as { applyFlagSettings?: (s: Record<string, unknown>) => Promise<void> }).applyFlagSettings;
+  if (typeof apply !== 'function') return false;
+  try {
+    await apply.call(live.query, { effortLevel: effort });
+    live.effort = effort;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Why a request is expected to re-write the conversation into the cache, or null. */
+function coldReason(o: {
+  mode: 'fresh' | 'resume' | 'continue' | 'one-shot';
+  planReason: string;
+  seatChanged: boolean;
+  idleMs: number | undefined;
+  ttlMs: number;
+  keyed: boolean;
+}): string | null {
+  if (o.mode === 'one-shot') return o.keyed ? 'one-shot request (whole history re-sent)' : null;
+  if (o.mode === 'fresh') return o.planReason === 'new' ? 'new conversation' : `new session: ${o.planReason}`;
+  if (o.seatChanged) return 'seat switch';
+  if (o.idleMs !== undefined && o.idleMs > o.ttlMs) return 'prompt cache expired';
+  return null;
+}
+
+/** The facts the host UI shows for a served request (see {@link ProviderSessionInfo}). */
+function sessionInfo(o: {
+  account: Account;
+  mode: ProviderSessionInfo['mode'];
+  usage: SdkUsage | undefined;
+  expectedCold: string | null;
+  previousTurnAt: number | undefined;
+  ttlMs: number;
+  thread: string | null;
+}): ProviderSessionInfo {
+  const input = o.usage?.input_tokens ?? 0;
+  const cacheRead = o.usage?.cache_read_input_tokens ?? 0;
+  const cacheWrite = o.usage?.cache_creation_input_tokens ?? 0;
+  const contextTokens = input + cacheRead + cacheWrite;
+  // Measured, not guessed: most of the prompt was written, not read. A short
+  // prompt (a new conversation's first message) is not worth a warning.
+  const rewrote = cacheWrite >= 20_000 && cacheWrite > cacheRead;
+  const reason = rewrote ? o.expectedCold ?? 'cache miss' : null;
+  return {
+    provider: 'claude-code',
+    account: o.account.id,
+    accountLabel: o.account.label,
+    mode: o.mode,
+    input,
+    cacheRead,
+    cacheWrite,
+    output: o.usage?.output_tokens ?? 0,
+    contextTokens,
+    cold: reason ? { reason, tokens: cacheWrite } : null,
+    previousTurnAt: o.previousTurnAt ?? null,
+    at: Date.now(),
+    cacheTtlMs: o.ttlMs,
+  };
 }
 
 /** An abort the host recognises and closes the turn quietly on. */

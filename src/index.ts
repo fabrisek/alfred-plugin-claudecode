@@ -67,6 +67,11 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
         : 120_000,
     maxConcurrentRequests: limitOrUnlimited(raw.maxConcurrentRequests),
     maxParallelTasks: limitOrUnlimited(raw.maxParallelTasks),
+    // 0 = no limit; absent = the provider default (150k).
+    advisorMaxContextTokens:
+      typeof raw.advisorMaxContextTokens === 'number' && Number.isFinite(raw.advisorMaxContextTokens) && raw.advisorMaxContextTokens >= 0
+        ? raw.advisorMaxContextTokens
+        : undefined,
   };
 }
 
@@ -126,9 +131,13 @@ class UsageRefresher {
   constructor(private readonly pool: AccountPool, private readonly log?: { info(m: string, meta?: Record<string, unknown>): void }) {}
 
   start(): void {
+    let lastTick = Date.now();
     this.timer = setInterval(() => {
+      const now = Date.now();
       const every = this.pool.settings.usagePollMinutes * 60_000;
-      if (Date.now() - this.lastSweep >= every) void this.refreshAll();
+      if (now - this.lastSweep >= every) void this.refreshAll();
+      else this.refreshEnded(lastTick, now);
+      lastTick = now;
     }, 60_000);
     this.timer.unref?.();
     void this.refreshAll();
@@ -149,6 +158,20 @@ class UsageRefresher {
       if (wait > 0 && wait > SPACING_MS) continue;
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       await this.refresh(a, manual);
+    }
+  }
+
+  /**
+   * Seats whose bench (exhausted or throttled) ended since the last tick: read
+   * their usage now, so the panel shows the reset numbers instead of the
+   * pre-reset ones until the next sweep.
+   */
+  private refreshEnded(from: number, to: number): void {
+    for (const a of this.pool.list()) {
+      if (!a.enabled || !this.pool.hasCredentials(a)) continue;
+      const rt = this.pool.runtime(a.id);
+      const ended = [rt.exhaustedUntil, rt.throttledUntil].some((t) => t !== undefined && t > from && t <= to);
+      if (ended) void this.refresh(a);
     }
   }
 
@@ -641,8 +664,11 @@ function snapshot(pool: AccountPool, cli: CliInfo, advisor?: AdvisorPolicy): Rec
       preferred: i === 0,
       exposeModels: a.exposeModels,
       status,
-      statusDetail: why === 'exhausted' ? rt.exhaustedReason : why,
-      exhaustedUntil: rt.exhaustedUntil && rt.exhaustedUntil > now ? rt.exhaustedUntil : null,
+      statusDetail: why === 'exhausted' ? rt.exhaustedReason : why === 'throttled' ? rt.throttleReason : why,
+      // Set only while the seat really is out of quota (a throttle is not).
+      exhaustedUntil: why === 'exhausted' ? rt.exhaustedUntil ?? null : null,
+      // Short sit-out after a transient failure; the seat keeps its quota.
+      throttledUntil: why === 'throttled' ? rt.throttledUntil ?? null : null,
       usage: rt.usage ?? null,
       lastError: rt.lastError ?? null,
       lastUsedAt: rt.lastUsedAt ?? null,

@@ -106,6 +106,15 @@
         "enum": ["main", "all", "off"],
         "group": "Chat"
       },
+      "advisorMaxContextTokens": {
+        "type": "number",
+        "label": "Advisor up to (tokens)",
+        "description": "A Claude process started for a conversation larger than this runs without the advisor: each consult re-reads the whole context, uncached. A running process keeps the advisor it started with. 0 = no limit.",
+        "default": 150000,
+        "min": 0,
+        "step": 10000,
+        "group": "Chat"
+      },
       "sharedSessionStore": {
         "type": "boolean",
         "label": "Share sessions across seats",

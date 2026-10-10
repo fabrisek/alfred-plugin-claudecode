@@ -817,6 +817,8 @@ describe('Claude panel seats', () => {
       account('b', { status: 'ok', email: 'b@example.com', usage: { windows: [win(61, 21 / 60)], fetchedAt: T0, source: 'api' } }),
       account('c', { status: 'ok', email: 'c@example.com', usage: { windows: [win(75, 11 / 60)], fetchedAt: T0, source: 'api' } }),
       account('d', { status: 'ok', email: 'd@example.com', usage: { windows: [win(1, 4.85)], fetchedAt: T0, source: 'api' } }),
+      // A transient throttle on a seat with quota left: its own short state.
+      account('e', { status: 'throttled', throttledUntil: T0 + 2 * 60_000, statusDetail: 'throttled: API Error: 429', usage: { windows: [win(8, 4)], fetchedAt: T0, source: 'api' } }),
     ] as never;
     const d0 = new Date(T0);
     const today = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`;
@@ -848,6 +850,8 @@ describe('Claude panel seats', () => {
     assert.match(row('b'), /39%\S+ \(in 21m\)/, '"39% left", the reset time and how long until it');
     assert.match(row('c'), /use before/, 'a lot left and lost soon is flagged');
     assert.doesNotMatch(row('d'), /use before/);
+    assert.match(row('e'), /throttled · back \S+ \(in 2m\)/, 'a throttle is not "exhausted"');
+    assert.doesNotMatch(row('e'), /exhausted/);
     assert.match(row('a'), /PRM/, 'the plan as a short pill');
     assert.doesNotMatch(row('b'), /@example\.com/, 'no email column: it is in the name tooltip');
     assert.deepEqual(page.errors, []);
