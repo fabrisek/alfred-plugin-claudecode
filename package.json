@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts tests/modelContext.test.ts tests/hostTools.test.ts tests/apiCost.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/seatsUsage.test.ts tests/panel.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts tests/modelContext.test.ts tests/hostTools.test.ts tests/apiCost.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
@@ -115,6 +115,33 @@
         "min": 0,
         "step": 10000,
         "group": "Chat"
+      },
+      "planWeightStandard": {
+        "type": "number",
+        "label": "Plan weight: Team Standard",
+        "description": "Relative quota size of a Team Standard seat (also Pro) in the plan-weighted '5h used' / 'Week used' figures of the Usage tab.",
+        "default": 1,
+        "min": 0.1,
+        "step": 0.5,
+        "group": "Usage"
+      },
+      "planWeightPremium": {
+        "type": "number",
+        "label": "Plan weight: Team Premium",
+        "description": "Relative quota size of a Team Premium seat in the plan-weighted usage figures.",
+        "default": 5,
+        "min": 0.1,
+        "step": 0.5,
+        "group": "Usage"
+      },
+      "planWeightMax": {
+        "type": "number",
+        "label": "Plan weight: Max 20x",
+        "description": "Relative quota size of a Max 20x seat in the plan-weighted usage figures (Max 5x counts a quarter of it).",
+        "default": 20,
+        "min": 0.1,
+        "step": 1,
+        "group": "Usage"
       },
       "sharedSessionStore": {
         "type": "boolean",

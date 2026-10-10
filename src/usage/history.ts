@@ -12,6 +12,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { PRICES_VERIFIED, costOf, priceOf, type Vec } from './pricing.js';
+import { addToThread, pruneThreads, type ThreadLedgerData, type ThreadRef } from './threadLedger.js';
+import { addMinute, pruneMinutes, type MinuteData } from './throughput.js';
 
 export const HOUR_MS = 3_600_000;
 export const KEEP_HOURS = 35 * 24;
@@ -43,6 +45,12 @@ type StoreFile = {
   backfilledAt?: number;
   /** How the history was attributed; a store from another revision is rebuilt from the transcripts. */
   rev?: number;
+  /** Per-thread spend (usage/threadLedger.ts), recorded since this field exists. */
+  threads?: ThreadLedgerData;
+  /** Tokens per minute, last two days (usage/throughput.ts). */
+  minutes?: MinuteData;
+  /** When per-thread recording started. */
+  threadsSince?: number;
 };
 
 export function emptyVec(): Vec {
@@ -165,12 +173,15 @@ export class UsageStore {
           lastAt: raw.lastAt,
           backfilledAt: raw.backfilledAt,
           rev: this.rev,
+          threads: raw.threads ?? {},
+          minutes: raw.minutes ?? {},
+          threadsSince: raw.threadsSince ?? this.now(),
         };
       }
     } catch {
       // First run, or unreadable: start over (the backfill rebuilds it).
     }
-    return { version: 1, keys: [], hours: {}, days: {}, files: {}, rev: this.rev };
+    return { version: 1, keys: [], hours: {}, days: {}, files: {}, rev: this.rev, threads: {}, minutes: {}, threadsSince: this.now() };
   }
 
   get backfilledAt(): number | undefined {
@@ -218,8 +229,12 @@ export class UsageStore {
     return i;
   }
 
-  /** Counts one response (or the growth of one already counted). */
-  add(at: number, account: string, model: string, agent: string, v: Vec): void {
+  /**
+   * Counts one response (or the growth of one already counted). `thread`:
+   * the Alfred thread it belongs to, when known: its share also goes to the
+   * per-thread ledger. Every response also feeds the per-minute throughput.
+   */
+  add(at: number, account: string, model: string, agent: string, v: Vec, thread?: ThreadRef): void {
     if (!Number.isFinite(at)) return;
     const now = this.now();
     // Buckets older than retention would be pruned right away.
@@ -232,6 +247,9 @@ export class UsageStore {
     }
     const db = (this.data.days[dayOf(at)] ??= {});
     addVec((db[k] ??= emptyVec()), v);
+    const tok = v[1] + v[2] + v[3] + v[4] + v[5];
+    addMinute((this.data.minutes ??= {}), at, tok);
+    if (thread) addToThread((this.data.threads ??= {}), thread, at, account || 'unknown', v[0], tok, costOf(model || 'unknown', v));
     if (this.data.firstAt === undefined || at < this.data.firstAt) this.data.firstAt = at;
     if (this.data.lastAt === undefined || at > this.data.lastAt) this.data.lastAt = at;
     this.dirty = true;
@@ -253,6 +271,41 @@ export class UsageStore {
       if (d < minDay) {
         delete this.data.days[d];
         this.dirty = true;
+      }
+    }
+    if (this.data.threads && pruneThreads(this.data.threads, minHour)) this.dirty = true;
+    if (this.data.minutes && pruneMinutes(this.data.minutes, now)) this.dirty = true;
+  }
+
+  /** Per-thread spend (read-only view). */
+  get threads(): Readonly<ThreadLedgerData> {
+    return this.data.threads ?? {};
+  }
+
+  /** When per-thread recording started: spend before has no thread. */
+  get threadsSince(): number {
+    return this.data.threadsSince ?? this.now();
+  }
+
+  /** Tokens per minute (read-only view). */
+  get minutes(): Readonly<MinuteData> {
+    return this.data.minutes ?? {};
+  }
+
+  get firstAt(): number | undefined {
+    return this.data.firstAt;
+  }
+
+  /**
+   * Every bucket of one granularity: `hours` (key = hour index) or `days`
+   * (key = local day). For aggregations that need the model and agent axes.
+   */
+  forEachBucket(kind: 'hours' | 'days', fn: (bucket: string, account: string, model: string, agent: string, v: Vec) => void): void {
+    const src = kind === 'hours' ? this.data.hours : this.data.days;
+    for (const [b, bucket] of Object.entries(src)) {
+      for (const [ki, v] of Object.entries(bucket)) {
+        const [account, model, agent] = this.data.keys[Number(ki)].split(SEP);
+        fn(b, account, model, agent ?? '', v);
       }
     }
   }

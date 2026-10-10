@@ -11,10 +11,11 @@ import { join } from 'node:path';
 import type { AccountPool } from '../accounts/pool.js';
 import type { SessionIndex } from '../session/sessions.js';
 import { UsageStore } from './history.js';
-import { TranscriptScanner } from './transcripts.js';
+import { TranscriptScanner, agentOfCwd } from './transcripts.js';
+import { threadOfKey } from './threadLedger.js';
 import { CapacityTracker, capacityRows } from './capacity.js';
 import { dayOf } from './history.js';
-import { planOf } from './pricing.js';
+import { planOf, type Plan } from './pricing.js';
 import { readdirSync, statSync } from 'node:fs';
 
 export const USAGE_SCAN_EVERY_MS = 60_000;
@@ -29,9 +30,20 @@ export const USAGE_SCAN_EVERY_MS = 60_000;
  */
 export const USAGE_ATTRIBUTION_REV = 5;
 
-export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sessions: SessionIndex): { stop(): void } {
+export type UsageHistoryHandles = {
+  stop(): void;
+  store: UsageStore;
+  scanner: TranscriptScanner;
+  capacity: CapacityTracker;
+  engine: EngineSessionIndex;
+  /** Plan of each seat (re-read every 10 min). */
+  plans(): Record<string, Plan>;
+};
+
+export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sessions: SessionIndex): UsageHistoryHandles {
   const store = new UsageStore(join(ctx.dataDir, 'usage-history.json'), Date.now, USAGE_ATTRIBUTION_REV);
-  const engineSeats = engineSessionSeats(join(ctx.dataDir, 'engine-sessions'));
+  const engine = engineSessionIndex(join(ctx.dataDir, 'engine-sessions'));
+  const engineSeats = (sid: string): string | undefined => engine.bySession(sid)?.accountId;
   // Login of each seat: what the pool read from it, else its own .claude.json. Re-read every minute.
   let byEmail = new Map<string, string[]>();
   let byEmailAt = 0;
@@ -62,6 +74,14 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
     ],
     accountOf: (sid) => sessions.get(sid)?.accountId ?? engineSeats(sid),
     accountsOfEmail: (email) => seatsByEmail().get(email) ?? [],
+    // Engine threads by their session key; a session the plugin recorded
+    // without one (claude_code_run, CLI chat) is its own thread.
+    threadOf: (sid) => {
+      const rec = engine.bySession(sid);
+      if (rec?.key) return threadOfKey(rec.key);
+      const s = sessions.get(sid);
+      return s ? { key: `session:${sid}`, conv: sid, agent: agentOfCwd(s.cwd) || 'claude_code' } : undefined;
+    },
     logger: ctx.logger,
   });
   scanner.start(USAGE_SCAN_EVERY_MS, 5_000);
@@ -81,7 +101,7 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
   capTimer.unref?.();
 
   // Plan of each seat, from its own login files (re-read every 10 min).
-  let plans: Record<string, { label: string; monthlyUsd: number }> = {};
+  let plans: Record<string, Plan> = {};
   let plansAt = 0;
   const readJson = (path: string): Record<string, unknown> => {
     try {
@@ -98,7 +118,7 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
       const creds = (readJson(pool.credentialsPath(a)).claudeAiOauth ?? {}) as { subscriptionType?: string; rateLimitTier?: string };
       const acct = (readJson(pool.globalConfigPath(a)).oauthAccount ?? {}) as { seatTier?: string };
       const plan = planOf({ subscriptionType: creds.subscriptionType ?? pool.runtime(a.id).subscriptionType, rateLimitTier: creds.rateLimitTier, seatTier: acct.seatTier });
-      if (plan) out[a.id] = { label: plan.label, monthlyUsd: plan.monthlyUsd };
+      if (plan) out[a.id] = plan;
     }
     plans = out;
     return plans;
@@ -118,7 +138,7 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
       const view = store.view({
         scan: scanner.status,
         seats: pool.list().map((x) => ({ id: x.id, label: x.label })),
-        plans: seatPlans(),
+        plans: Object.fromEntries(Object.entries(seatPlans()).map(([id, p]) => [id, { label: p.label, monthlyUsd: p.monthlyUsd }])),
         hourSpan: Number.isFinite(hours) && hours >= 24 && hours <= 24 * 30 ? Math.round(hours) : 48,
       });
       return { ok: true, ...view, version, capacity: capacityView(capacity, store), seatSpend: seatSpend(), quota: quotaView() };
@@ -166,6 +186,11 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
   }
 
   return {
+    store,
+    scanner,
+    capacity,
+    engine,
+    plans: seatPlans,
     stop: () => {
       clearInterval(capTimer);
       scanner.stop();
@@ -185,7 +210,27 @@ export function registerUsageHistory(ctx: PluginContext, pool: AccountPool, sess
  * at most every 30 s, and only the files that changed.
  */
 export function engineSessionSeats(dir: string): (sessionId: string) => string | undefined {
-  const bySession = new Map<string, string>();
+  const idx = engineSessionIndex(dir);
+  return (sessionId) => idx.bySession(sessionId)?.accountId;
+}
+
+/** What the panel reads from an engine session record. */
+export type EngineRecordView = { key: string; sessionId: string | null; accountId: string; updatedAt: number; contextTokens?: number };
+
+export type EngineSessionIndex = {
+  bySession(sessionId: string): EngineRecordView | undefined;
+  /** Every record (refreshed at most every 30 s). */
+  records(): EngineRecordView[];
+};
+
+/**
+ * Index of the engine session records (`state/engine-sessions/*.json`):
+ * by Claude session id, and the full list. Read-only and defensive; re-read
+ * at most every 30 s, and only the files that changed.
+ */
+export function engineSessionIndex(dir: string): EngineSessionIndex {
+  const bySession = new Map<string, EngineRecordView>();
+  const byFile = new Map<string, EngineRecordView>();
   const seen = new Map<string, number>();
   let at = 0;
   const refresh = (): void => {
@@ -203,16 +248,33 @@ export function engineSessionSeats(dir: string): (sessionId: string) => string |
         const m = statSync(path).mtimeMs;
         if (seen.get(n) === m) continue;
         seen.set(n, m);
-        const rec = JSON.parse(readFileSync(path, 'utf8')) as { sessionId?: unknown; accountId?: unknown };
-        if (typeof rec.sessionId === 'string' && typeof rec.accountId === 'string') bySession.set(rec.sessionId, rec.accountId);
+        const rec = JSON.parse(readFileSync(path, 'utf8')) as { key?: unknown; sessionId?: unknown; accountId?: unknown; updatedAt?: unknown; contextTokens?: unknown };
+        if (typeof rec.accountId !== 'string') continue;
+        const view: EngineRecordView = {
+          key: typeof rec.key === 'string' ? rec.key : '',
+          sessionId: typeof rec.sessionId === 'string' ? rec.sessionId : null,
+          accountId: rec.accountId,
+          updatedAt: typeof rec.updatedAt === 'number' ? rec.updatedAt : m,
+          ...(typeof rec.contextTokens === 'number' ? { contextTokens: rec.contextTokens } : {}),
+        };
+        byFile.set(n, view);
+        // A session id stays mapped after its thread moved on to a new one:
+        // lines still appended to the old transcript keep their thread.
+        if (view.sessionId) bySession.set(view.sessionId, view);
       } catch {
         // Being written, or not a record.
       }
     }
   };
-  return (sessionId) => {
-    refresh();
-    return bySession.get(sessionId);
+  return {
+    bySession: (sessionId) => {
+      refresh();
+      return bySession.get(sessionId);
+    },
+    records: () => {
+      refresh();
+      return [...byFile.values()];
+    },
   };
 }
 

@@ -3,10 +3,10 @@
  * (state/usage-history.json; skipped when there is none):
  * - the store: continuous days up to today (local time), finite non-negative
  *   cells, the per-seat totals adding up to the whole;
- * - the page, for every view, period and tokens / $ switch: no NaN,
- *   undefined or Infinity anywhere, no duplicate legend entry, no
- *   "unknown" category, the strip total equal to the sum of the bars, and
- *   the per-seat small charts adding up to it.
+ * - the Seats / Usage payload: every day and hour adding up over seats and
+ *   models (unknown seat included), per-thread spend within the totals;
+ * - the page, for every tab, period, unit, split and leaderboard: no NaN,
+ *   undefined or Infinity anywhere, no script error.
  */
 
 import assert from 'node:assert/strict';
@@ -17,6 +17,9 @@ import { describe, it } from 'node:test';
 import { UsageStore, dayOf, CELL_LEN } from '../src/usage/history.js';
 import { renderDashboard } from '../src/webview/dashboard.js';
 import { runPage } from './webviewVm.js';
+import { DEFAULT_PLAN_WEIGHTS } from '../src/usage/planWeights.js';
+import { buildSeatsUsage, cellTokens, cellUsd } from '../src/usage/seatsUsage.js';
+import { seat } from './seatsUsageFixture.js';
 import { USAGE_ATTRIBUTION_REV } from '../src/usage/register.js';
 
 const STATE = join(fileURLToPath(new URL('../state/', import.meta.url)), 'usage-history.json');
@@ -30,8 +33,8 @@ function realView() {
   return { store, view: { ok: true, ...view, version: 'real', capacity: { since: Date.now() - 86_400_000, rows: [] } } };
 }
 
-const close = (a: number, b: number, what: string): void => {
-  assert.ok(Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 1e-9), `${what}: ${a} vs ${b}`);
+const close = (a: number, b: number, what: string, eps = 1e-6): void => {
+  assert.ok(Math.abs(a - b) <= Math.max(eps, Math.abs(b) * 1e-9), `${what}: ${a} vs ${b}`);
 };
 
 describe('usage history on the real data', { skip: !HAVE && 'no state/usage-history.json' }, () => {
@@ -63,68 +66,67 @@ describe('usage history on the real data', { skip: !HAVE && 'no state/usage-hist
     assert.equal(new Set(view.accounts.map((a) => a.label)).size, view.accounts.length, 'one label per seat');
   });
 
-  it('page: every view, period and unit is consistent and clean', async () => {
-    const { view } = realView();
-    const snap = {
-      ok: true,
-      settings: { strategy: 'drain', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 },
-      cli: 'CLI',
-      accounts: [],
-      totals: { window5h: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, requests: 0 }, week: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, requests: 0 }, total: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, requests: 0 } },
-      recent: [],
-      activity: [],
-    };
-    const page = await runPage(renderDashboard(), async (action) => (action === 'usageHistory' ? structuredClone(view) : structuredClone(snap)));
-    await page.click(page.doc.querySelector('button[data-act=tab][data-id=usage]'));
-    const nums = (sel: string, attr: string) => page.doc.querySelectorAll(sel).map((e) => Number(e.getAttribute(attr)));
-    const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-    const strip = () => page.doc.querySelector('#useStrip [data-tok]')!;
-    const checked: string[] = [];
-    for (const metric of ['tokens', 'cost']) {
-      await page.click(page.doc.querySelector(`button[data-act=umetric][data-id=${metric}]`));
-      for (const v of ['overview', 'byseat', 'hourly', 'daily', 'cost', 'capacity', 'quota']) {
-        await page.click(page.doc.querySelector(`button[data-act=uview][data-id=${v}]`));
-        const periods = page.doc.querySelectorAll('#usePeriod option').map((o) => o.getAttribute('value')!);
-        for (const per of periods) {
-          await page.type(page.$('usePeriod'), per);
-          const where = `${metric}/${v}/${per}`;
-          checked.push(where);
-          for (const id of ['useChart', 'useStrip', 'useLegend', 'useScope']) {
-            const html = page.$(id)!.innerHTML;
-            assert.doesNotMatch(html, /NaN|undefined|Infinity/, `${where} #${id}`);
-          }
-          const legend = page.doc.querySelectorAll('#useLegend > span').map((e) => e.textContent);
-          assert.equal(new Set(legend).size, legend.length, `${where}: legend without duplicates`);
-          assert.ok(!legend.includes('unknown'), `${where}: no raw "unknown"`);
-          if (v === 'overview' || v === 'hourly' || v === 'daily') {
-            const bars = page.doc.querySelectorAll('#useChart g.col[data-tok]');
-            assert.ok(bars.length > 0, `${where}: bars`);
-            close(sum(nums('#useChart g.col[data-tok]', 'data-tok')), Number(strip().getAttribute('data-tok')), `${where}: strip tokens = sum of the bars`);
-            close(sum(nums('#useChart g.col[data-tok]', 'data-usd')), Number(strip().getAttribute('data-usd')), `${where}: strip $ = sum of the bars`);
-          }
-          if (v === 'byseat') {
-            // Tokens without a seat are no series but stay in the total.
-            const seats = sum(nums('#useChart button.mult', 'data-tok'));
-            const all = Number(strip().getAttribute('data-tok'));
-            const seatless = Object.entries(view.daily)
-              .filter(([id]) => !view.accounts.some((a) => a.id === id))
-              .reduce((s, [, rows]) => s + rows.reduce((t, c) => t + c[0] + c[1] + c[2] + c[3], 0), 0);
-            assert.ok(seats <= all + 1e-6 && all - seats <= seatless + 1e-6, `${where}: seats + seatless add up to the total (${seats} + <=${seatless} vs ${all})`);
-          }
-          // Bars stay inside the chart.
-          const svg = page.doc.querySelector('#useChart svg');
-          if (svg) {
-            const h = Number(svg.getAttribute('height'));
-            for (const r of page.doc.querySelectorAll('#useChart svg rect')) {
-              const y = Number(r.getAttribute('y'));
-              const rh = Number(r.getAttribute('height'));
-              assert.ok(y >= 0 && y + rh <= h + 0.5, `${where}: a bar overflows (${y} + ${rh} > ${h})`);
-            }
+  it('seats usage payload: every day and hour adds up over seats and models, threads within the totals', () => {
+    const u = realPanel();
+    for (const r of [...u.daily, ...u.hourly]) {
+      const where = 'd' in r ? r.d : new Date(r.t).toISOString();
+      close(cellTokens(r.tot), Object.values(r.seat).reduce((s, c) => s + cellTokens(c), 0), `${where}: seats tokens`);
+      close(cellUsd(r.tot), Object.values(r.seat).reduce((s, c) => s + cellUsd(c), 0), `${where}: seats $`, 1e-2);
+      close(cellUsd(r.tot), Object.values(r.model).reduce((s, c) => s + cellUsd(c), 0), `${where}: models $`, 1e-2);
+      for (const x of r.tot) assert.ok(Number.isFinite(x) && x >= 0, `${where}: ${r.tot}`);
+    }
+    const all = u.daily.reduce((s, r) => s + cellUsd(r.tot), 0);
+    assert.ok(u.attributed.all <= all * 1.001 + 0.01, `per-thread spend within the total (${u.attributed.all} vs ${all})`);
+  });
+
+  it('page: every tab, period, unit, split and leaderboard is clean on the real data', async () => {
+    const u = realPanel();
+    const page = await runPage(renderDashboard(), async (action) =>
+      action === 'seatsUsage' ? { ok: true, version: 'real', ...structuredClone(u) } : { ok: true, settings: { strategy: 'drain', threshold: 90 }, accounts: [], activity: [], recent: [] },
+    );
+    assert.deepEqual(page.errors, []);
+    assert.equal(page.doc.querySelectorAll('#seatRows .bub').length, u.seats.length);
+    await page.click(page.doc.querySelector('.tab[data-tab=usage]'));
+    let n = 0;
+    for (const per of ['5h', 'today', '7d', 'all']) {
+      await page.click(page.doc.querySelector(`#period button[data-v="${per}"]`));
+      for (const unit of ['tok', 'usd']) {
+        await page.click(page.doc.querySelector(`#unit button[data-v=${unit}]`));
+        for (const split of ['type', 'seat']) {
+          await page.click(page.doc.querySelector(`#split button[data-v=${split}]`));
+          for (const by of ['seat', 'agent', 'conv']) {
+            await page.click(page.doc.querySelector(`#dpsBy button[data-v=${by}]`));
+            assert.doesNotMatch(page.$('app')!.innerHTML, /NaN|undefined|Infinity|\[object /, `${per}/${unit}/${split}/${by}`);
+            n++;
           }
         }
       }
     }
-    assert.ok(checked.length >= 40, `${checked.length} combinations checked`);
+    assert.equal(n, 48);
     assert.deepEqual(page.errors, []);
   });
 });
+
+/** The panel payload over the real history, one Team seat per account seen in it. */
+function realPanel() {
+  const { store } = realView();
+  const ids = new Set<string>();
+  store.forEachBucket('days', (_d, account) => {
+    if (account !== 'unknown') ids.add(account);
+  });
+  return buildSeatsUsage({
+    now: Date.now(),
+    store,
+    seats: [...ids].map((id) => seat({ id, label: id })),
+    cold: [],
+    compactions: [],
+    coldTotal: 0,
+    modesToday: {},
+    threadInfo: () => undefined,
+    liveThreads: [],
+    samples: () => [],
+    resets: [],
+    weights: DEFAULT_PLAN_WEIGHTS,
+    nextId: null,
+  });
+}

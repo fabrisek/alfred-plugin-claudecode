@@ -235,6 +235,30 @@ export class Element extends Node {
     if (v) this.setAttribute('hidden', '');
     else this.removeAttribute('hidden');
   }
+  /**
+   * No layout engine: every rendered element is a fixed box, so code that
+   * draws only visible zones at their size (charts, lists) still runs.
+   * An element under a `hidden` ancestor has no box.
+   */
+  static box = { width: 800, height: 300 };
+  private get rendered(): boolean {
+    for (let n: Element | null = this; n; n = n.parentNode) if (n.hidden) return false;
+    return true;
+  }
+  get offsetParent(): Element | null {
+    return this.rendered ? (this.parentNode ?? this) : null;
+  }
+  get clientWidth(): number {
+    return this.rendered ? Element.box.width : 0;
+  }
+  get clientHeight(): number {
+    return this.rendered ? Element.box.height : 0;
+  }
+  getBoundingClientRect(): { left: number; top: number; right: number; bottom: number; width: number; height: number; x: number; y: number } {
+    const w = this.clientWidth;
+    const h = this.clientHeight;
+    return { left: 0, top: 0, right: w, bottom: h, width: w, height: h, x: 0, y: 0 };
+  }
   get open(): boolean {
     return this.hasAttribute('open');
   }

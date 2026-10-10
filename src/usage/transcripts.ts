@@ -24,6 +24,7 @@ import { open, readdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pricedModel, type Vec } from './pricing.js';
 import type { FileState, ScanStatus, UsageStore } from './history.js';
+import type { ThreadRef } from './threadLedger.js';
 
 /** Project dir names (encoded cwd) that are Alfred's. */
 export const ALFRED_DIR_PATTERNS: RegExp[] = [
@@ -120,6 +121,8 @@ export type ScannerOptions = {
   accountOf: (sessionId: string) => string | undefined;
   /** Seats logged in as this email (several seats can share one login). */
   accountsOfEmail?: (email: string) => string[];
+  /** Alfred thread a session belongs to, when the plugin knows (per-thread spend). */
+  threadOf?: (sessionId: string) => ThreadRef | undefined;
   logger?: { info(msg: string, meta?: Record<string, unknown>): void; warn(msg: string, meta?: Record<string, unknown>): void };
   now?: () => number;
 };
@@ -130,6 +133,7 @@ export class TranscriptScanner {
   private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private soonTimer: ReturnType<typeof setTimeout> | null = null;
   /** Last cache TTL seen per seat. */
   private readonly ttl = new Map<string, '5m' | '1h'>();
   readonly status: ScanStatus;
@@ -156,11 +160,27 @@ export class TranscriptScanner {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.soonTimer = null;
     try {
       this.opts.store.save();
     } catch {
       // Best effort on shutdown.
     }
+  }
+
+  /**
+   * A pass a few seconds from now (after a served request), so the live
+   * figures follow traffic instead of the one-minute cadence. Repeated calls
+   * within the delay share one pass.
+   */
+  soon(delayMs = 3_000): void {
+    if (this.stopped || this.soonTimer) return;
+    this.soonTimer = setTimeout(() => {
+      this.soonTimer = null;
+      if (!this.stopped) void this.scan();
+    }, delayMs);
+    this.soonTimer.unref?.();
   }
 
   /** One pass; a pass already running is joined, not doubled. */
@@ -383,6 +403,7 @@ export class TranscriptScanner {
 
   private countLines(text: string, t: Target, ids: Record<string, [number, number, number, number, number]>, ctx: { email?: string }): void {
     let account = this.seatOf(t.sessionId, ctx.email);
+    const thread = this.opts.threadOf?.(t.sessionId);
     let start = 0;
     while (start < text.length) {
       let nl = text.indexOf('\n', start);
@@ -420,7 +441,7 @@ export class TranscriptScanner {
       }
       // A length-priced model is stored per price band (usage/pricing.ts).
       const model = pricedModel(p.model, p.v[1] + p.v[2] + p.v[3] + p.v[4], p.fast);
-      this.opts.store.add(p.at, account, model, agentOfCwd(p.cwd), v);
+      this.opts.store.add(p.at, account, model, agentOfCwd(p.cwd), v, thread);
       // Advisor iterations, once per response (their growth on a repeated line).
       p.advisor.forEach((ad, k) => {
         const key = `${p.id}#adv${k}`;
@@ -428,7 +449,7 @@ export class TranscriptScanner {
         const g: Vec = [0, 0, 0, 0, 0, 0];
         for (let i = 0; i < 5; i++) g[i + 1] = Math.max(0, ad.v[i + 1] - (before ? before[i] : 0));
         ids[key] = [ad.v[1], ad.v[2], ad.v[3], ad.v[4], ad.v[5]];
-        if (g[1] + g[2] + g[3] + g[4] + g[5] > 0) this.opts.store.add(p.at, account, `${ad.model}@advisor`, agentOfCwd(p.cwd), g);
+        if (g[1] + g[2] + g[3] + g[4] + g[5] > 0) this.opts.store.add(p.at, account, `${ad.model}@advisor`, agentOfCwd(p.cwd), g, thread);
       });
     }
   }

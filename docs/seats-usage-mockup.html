@@ -1,0 +1,1066 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Seats Mockup</title>
+<style>
+/* Alfred host tokens (autopilot/src/webview/styles.ts) — fallbacks for a standalone render. */
+:root, :root[data-theme='dark'] {
+  --fb-bg: #0a0a0a; --fb-bg-elev: #131313; --fb-panel: #181818; --fb-panel-2: #222222;
+  --fb-panel-3: #2c2c2c; --fb-border: #1f1f1f; --fb-border-strong: #2e2e2e;
+  --fb-text: #ededed; --fb-text-muted: #9a9a9a; --fb-text-dim: #6a6a6a;
+  --fb-accent: #ededed; --fb-on-accent: #0a0a0a;
+  --fb-success: #6fae7a; --fb-warning: #d0a050; --fb-danger: #d76558; --fb-info: #5b9bf8;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --s-neutral: #77756f; --shadow: rgba(0,0,0,.45);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --fb-bg: #fafafa; --fb-bg-elev: #ffffff; --fb-panel: #f3f3f4; --fb-panel-2: #e8e8ea;
+    --fb-panel-3: #dadadd; --fb-border: #e4e4e7; --fb-border-strong: #c9c9ce;
+    --fb-text: #141414; --fb-text-muted: #5e5e66; --fb-text-dim: #8e8e96;
+    --fb-accent: #141414; --fb-on-accent: #ffffff;
+    --fb-success: #3f7d4d; --fb-warning: #a37314; --fb-danger: #b8463a; --fb-info: #2f6fd0;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+    --s-neutral: #8e8c86; --shadow: rgba(0,0,0,.12);
+    color-scheme: light;
+  }
+}
+:root[data-theme='light'] {
+  --fb-bg: #fafafa; --fb-bg-elev: #ffffff; --fb-panel: #f3f3f4; --fb-panel-2: #e8e8ea;
+  --fb-panel-3: #dadadd; --fb-border: #e4e4e7; --fb-border-strong: #c9c9ce;
+  --fb-text: #141414; --fb-text-muted: #5e5e66; --fb-text-dim: #8e8e96;
+  --fb-accent: #141414; --fb-on-accent: #ffffff;
+  --fb-success: #3f7d4d; --fb-warning: #a37314; --fb-danger: #b8463a; --fb-info: #2f6fd0;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+  --s-neutral: #8e8c86; --shadow: rgba(0,0,0,.12);
+  color-scheme: light;
+}
+:root {
+  --bg: var(--alfred-color-bg, var(--fb-bg));
+  --elev: var(--alfred-color-bg-elev, var(--fb-bg-elev));
+  --panel: var(--alfred-color-panel, var(--fb-panel));
+  --panel-2: var(--alfred-color-panel-2, var(--fb-panel-2));
+  --panel-3: var(--alfred-color-panel-3, var(--fb-panel-3));
+  --border: var(--alfred-color-border, var(--fb-border));
+  --border-strong: var(--alfred-color-border-strong, var(--fb-border-strong));
+  --text: var(--alfred-color-text, var(--fb-text));
+  --muted: var(--alfred-color-text-muted, var(--fb-text-muted));
+  --dim: var(--alfred-color-text-dim, var(--fb-text-dim));
+  --accent: var(--alfred-color-accent, var(--fb-accent));
+  --on-accent: var(--alfred-color-on-accent, var(--fb-on-accent));
+  --ok: var(--alfred-color-success, var(--fb-success));
+  --warn: var(--alfred-color-warning, var(--fb-warning));
+  --err: var(--alfred-color-danger, var(--fb-danger));
+  --info: var(--alfred-color-info, var(--fb-info));
+  --font: var(--alfred-font-sans, 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif);
+  --mono: var(--alfred-font-mono, 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace);
+  --r: var(--alfred-radius, .375rem); --r-lg: var(--alfred-radius-lg, .5rem); --r-xl: var(--alfred-radius-xl, .75rem);
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; line-height: 1.4;
+  -webkit-font-smoothing: antialiased; font-feature-settings: 'cv11', 'ss01', 'ss03'; }
+body { padding: 12px 16px; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
+button { font-family: inherit; cursor: pointer; color: inherit; }
+:where(button, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.card { background: var(--elev); border: 1px solid var(--border); border-radius: var(--r-xl); min-width: 0; min-height: 0; }
+.click { cursor: pointer; transition: border-color .15s, background .15s; }
+.click:hover { border-color: var(--border-strong); }
+.label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); font-weight: 600; white-space: nowrap; }
+.sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.seg { display: inline-flex; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r); padding: 2px; gap: 2px; }
+.seg button { border: 0; background: none; color: var(--muted); font-size: 11.5px; padding: 2px 8px; border-radius: calc(var(--r) - 2px); }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--panel-3); color: var(--text); font-weight: 600; }
+.spacer { flex: 1; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* top line */
+.top { display: flex; align-items: center; gap: 12px; flex: none; }
+.top h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; }
+
+/* ===== layout ===== */
+body { padding: 0 16px 12px; gap: 12px; }
+.top { border-bottom: 1px solid var(--border); gap: 14px; min-height: 42px; }
+.tabs { display: flex; gap: 2px; align-self: stretch; }
+.tab { border: 0; background: none; padding: 0 10px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: 13px; }
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+body.compact .tabs { display: none; }
+#app { flex: 1; min-height: 0; display: grid; gap: 12px; }
+#app > * { min-width: 0; min-height: 0; }
+.blk { background: var(--elev); border-radius: var(--r-xl); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.bh { display: flex; align-items: center; gap: 10px; flex: none; min-width: 0; }
+.bh h2 { margin: 0; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.bh .fig { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bh .fig b { color: var(--text); font-weight: 600; }
+.seg.xs button { font-size: 11px; padding: 1px 7px; }
+
+/* areas */
+#kSeat { grid-area: kseat; } #seats { grid-area: seats; } #quota { grid-area: quota; }
+#kUse { grid-area: kuse; } #main { grid-area: main; } #side { grid-area: side; } #events { grid-area: events; }
+body.balanced.t-seats #app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "kseat" "seats"; }
+body.balanced.t-seats #kUse, body.balanced.t-seats #main, body.balanced.t-seats #side, body.balanced.t-seats #events, body.balanced.t-seats #quota { display: none; }
+body.balanced.t-usage #app { grid-template-columns: minmax(0, 65fr) minmax(0, 35fr); grid-template-rows: auto minmax(0, 1fr) minmax(150px, 30%) auto; grid-template-areas: "kuse kuse" "main side" "quota side" "events events"; }
+body.balanced.t-usage #kSeat, body.balanced.t-usage #seats { display: none; }
+body.compact #app { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, .8fr); grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto; grid-template-areas: "kuse kuse kuse" "kseat kseat kseat" "seats seats side" "main main side" "events events events"; gap: 10px; }
+body.compact #quota { display: none; }
+body.compact.t-seats .usage-only, body.balanced.t-seats .usage-only { }
+#periodBox { display: flex; } body.balanced.t-seats #periodBox { visibility: hidden; }
+
+/* ===== KPI strips ===== */
+.kstrip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); background: var(--elev); border-radius: var(--r-xl); padding: 12px 4px; }
+.kp { padding: 0 14px; display: flex; flex-direction: column; gap: 3px; min-width: 0; position: relative; cursor: pointer; }
+.kp + .kp { box-shadow: -1px 0 0 var(--border); }
+.kp .l { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kp .vrow { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.kp .v { font-size: 22px; font-weight: 650; letter-spacing: -.025em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kp .s { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.kp .s b { color: var(--text); font-weight: 600; }
+.kp .ks { flex: 1; min-width: 40px; height: 26px; margin-bottom: 3px; }
+.kp .ks svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.delta { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.delta.up { color: var(--ok); } .delta.down { color: var(--err); } .delta.flat { color: var(--dim); }
+body.compact .kp .v { font-size: 17px; } body.compact .kp { padding: 0 10px; } body.compact .kstrip { padding: 9px 2px; }
+body.compact .kp .ks { height: 20px; }
+
+/* ===== seats table ===== */
+.tbl { display: flex; flex-direction: column; font-size: 13px; }
+.tr, .thd { display: grid; align-items: center; column-gap: 14px; padding: 0 10px;
+  grid-template-columns: 170px 92px minmax(120px, 1.1fr) minmax(170px, 1.3fr) minmax(110px, .9fr) 58px 92px 96px 66px 52px; }
+.thd { height: 26px; font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.thd .n, .tr .n { text-align: right; justify-self: end; }
+.tr { height: 37px; border-radius: var(--r); cursor: pointer; transition: background .12s; font-variant-numeric: tabular-nums; }
+.tr:hover, .tr.sel { background: var(--panel); }
+.grp { display: flex; align-items: center; gap: 10px; height: 26px; padding: 0 10px; font-size: 11px; color: var(--dim); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.grp::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.grp b { color: var(--muted); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.c-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.c-name .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan { font: 600 9.5px/1 var(--mono); padding: 2px 4px; border-radius: 3px; background: var(--panel-3); color: var(--muted); letter-spacing: .04em; flex: none; }
+.plan.MAX { color: var(--on-accent); background: var(--accent); }
+.adv { font: 600 9.5px/1 var(--mono); color: var(--s7); flex: none; } .adv.off { color: var(--dim); text-decoration: line-through; opacity: .55; }
+.nx { font-size: 9.5px; font-weight: 700; color: var(--ok); letter-spacing: .06em; }
+.c-st { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12.5px; }
+.c-st .d { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ok { color: var(--ok); } .info-c { color: var(--info); } .warn { color: var(--warn); } .err { color: var(--err); }
+.c-thr { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.c-thr b { font-weight: 600; } .c-thr small { font: 11px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+.c-bar { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+.c-bar .bt { flex: 1; height: 6px; border-radius: 3px; background: var(--panel-3); overflow: hidden; min-width: 30px; }
+.c-bar .bt i { display: block; height: 100%; border-radius: 3px; transition: width 1s var(--ease); }
+.c-bar .bt.na { background: repeating-linear-gradient(90deg, var(--panel-3) 0 3px, transparent 3px 7px); }
+.c-bar .pv { width: 34px; text-align: right; font-weight: 600; }
+.c-bar .rs { font-size: 11px; color: var(--dim); width: 52px; }
+.c-spark svg { display: block; width: 96px; height: 24px; overflow: visible; }
+.dimv { color: var(--dim); }
+body.compact .tr { height: 27px; font-size: 12px; }
+body.compact .tr, body.compact .thd { grid-template-columns: 160px 78px minmax(40px, .5fr) minmax(130px, 1.3fr) minmax(80px, .9fr) 80px 56px; column-gap: 10px; }
+body.compact .c-burn, body.compact .c-spark, body.compact .c-cold, body.compact .h-burn, body.compact .h-spark, body.compact .h-cold { display: none; }
+body.compact .c-thr small, body.compact .c-bar .rs { display: none; }
+body.compact .grp { height: 20px; }
+
+/* ===== seat bubbles ===== */
+.bubs { height: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 12px; }
+.bub { position: relative; background: var(--elev); border-radius: 16px; padding: 12px 14px 8px; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 6px;
+  min-width: 0; min-height: 0; cursor: pointer; transition: transform .18s var(--ease), box-shadow .18s, background .18s; }
+.bub:hover { transform: scale(1.03); background: var(--panel); box-shadow: 0 12px 30px var(--shadow); z-index: 2; }
+.bub.sel { background: var(--panel); }
+.bub.next { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 50%, transparent), 0 0 28px -6px color-mix(in srgb, var(--ok) 45%, transparent); }
+.bub.perso { background: transparent; border: 1px dashed var(--border-strong); }
+.bub .bh2 { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; }
+.bub .bh2 .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bub .bh2 .c-st { margin-left: auto; font-size: 11.5px; }
+.bub .bmid { display: flex; align-items: center; gap: 14px; min-height: 0; }
+.bub .rg { height: 100%; max-height: 108px; min-height: 56px; aspect-ratio: 1; flex: none; display: block; }
+.bub .binfo { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bub .bval { font-size: 18px; font-weight: 650; color: var(--text); letter-spacing: -.02em; line-height: 1.1; }
+.bub .bval small { font-size: 11.5px; font-weight: 500; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+.bub .bline { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bub .bline b { color: var(--text); font-weight: 600; }
+.avs { display: flex; align-items: center; min-height: 20px; }
+.av { width: 20px; height: 20px; border-radius: 50%; font: 700 9px/20px var(--font); text-align: center; color: #fff; box-shadow: 0 0 0 2px var(--elev); flex: none; text-transform: uppercase; }
+.av + .av { margin-left: -5px; }
+.av.more { background: var(--panel-3); color: var(--muted); font-weight: 600; }
+.bub:hover .av { box-shadow: 0 0 0 2px var(--panel); }
+.bub .bsp svg { display: block; width: 100%; height: 26px; overflow: visible; }
+body.compact .bubs { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+body.compact .bub { padding: 8px 10px 6px; border-radius: 12px; gap: 4px; }
+body.compact .bub .rg { max-height: 62px; min-height: 40px; }
+body.compact .bub .bsp, body.compact .bub .bline.burn { display: none; }
+body.compact .bub .bval { font-size: 15px; }
+#seats { background: none; padding: 0; }
+
+/* ===== charts ===== */
+.cw { position: relative; flex: 1; min-height: 0; }
+.cw svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.axis text { fill: var(--dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.axis .r { fill: var(--s4); }
+.grid line { stroke: var(--border); }
+.legend { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); min-width: 0; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend .ln { width: 12px; height: 0; border-top: 2px dashed var(--s4); display: inline-block; }
+.peak-l { fill: var(--text); font-size: 11px; font-weight: 600; }
+.peak-s { fill: var(--muted); font-weight: 500; }
+.xh line { stroke: var(--muted); stroke-dasharray: 2 3; }
+.mark { transition: transform .12s; transform-box: fill-box; transform-origin: center; }
+.mark.hot { transform: scale(1.6); }
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { animation: reveal 1s var(--ease) both; }
+  @keyframes reveal { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+}
+
+/* ===== side ===== */
+#side { display: flex; flex-direction: column; gap: 12px; }
+#side > .blk { flex: none; }
+#side > .blk.grow { flex: 1; min-height: 0; }
+.meter { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; align-items: center; }
+.meter svg { display: block; }
+.live { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; }
+.live .lv { font-size: 20px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.live .lv small { font-size: 11.5px; color: var(--muted); font-weight: 500; letter-spacing: 0; margin-left: 3px; }
+.live .ls { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.live svg { display: block; width: 100%; height: 34px; overflow: hidden; }
+.dps { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.dr { position: absolute; left: 0; right: 0; height: 22px; display: grid; grid-template-columns: minmax(0, 1fr) 56px 34px; gap: 8px; align-items: center;
+  transition: transform .55s var(--ease); font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; }
+.dr .bar { position: relative; height: 100%; border-radius: 4px; overflow: hidden; background: var(--panel); }
+.dr .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; opacity: .62; transition: width .8s var(--ease); }
+.dr .bar span { position: absolute; left: 8px; top: 0; bottom: 0; display: flex; align-items: center; gap: 6px; white-space: nowrap; font-weight: 600; color: var(--text);
+  text-shadow: 0 1px 2px rgba(0,0,0,.45); max-width: calc(100% - 12px); overflow: hidden; }
+.dr .bar span small { font: 500 10.5px var(--mono); opacity: .8; }
+.dr .v { text-align: right; font-weight: 600; } .dr .p { text-align: right; color: var(--dim); font-size: 11px; }
+.split { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 14px; align-items: center; }
+.donut svg { display: block; }
+.hb { display: flex; flex-direction: column; gap: 5px; }
+.hbr { display: grid; grid-template-columns: 78px minmax(0, 1fr) 46px 30px; gap: 8px; align-items: center; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.hbr .t { height: 6px; background: var(--panel); border-radius: 3px; overflow: hidden; }
+.hbr .t i { display: block; height: 100%; border-radius: 3px; transition: width .9s var(--ease); }
+.hbr .nm { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hbr .v { text-align: right; font-weight: 600; } .hbr .p { text-align: right; color: var(--dim); }
+
+/* ===== events strip ===== */
+#events { display: flex; align-items: center; gap: 18px; background: var(--elev); border-radius: var(--r-xl); padding: 8px 14px; font-size: 12px; min-width: 0; overflow: hidden; white-space: nowrap; }
+#events .eh { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+#events .eh b { color: var(--text); font-size: 12px; letter-spacing: 0; margin-left: 4px; }
+#events .ei { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; overflow: hidden; color: var(--muted); }
+#events .ei .tm { color: var(--dim); font-variant-numeric: tabular-nums; }
+#events .ei b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+#events .ei .tt { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+#events .sep { width: 1px; align-self: stretch; background: var(--border); }
+#events .all { margin-left: auto; border: 0; background: none; color: var(--info); font-size: 12px; padding: 0; }
+
+/* drawer + tooltip */
+.drawer { position: fixed; top: 12px; right: 16px; bottom: 12px; width: min(440px, 46vw); z-index: 20; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--r-xl); box-shadow: 0 18px 50px var(--shadow); }
+@media (prefers-reduced-motion: no-preference) { .drawer:not([hidden]) { animation: slide .22s var(--ease); } @keyframes slide { from { opacity: 0; transform: translateX(12px); } } }
+.dh { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.dh h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.dh .x { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: var(--r); }
+.dh .x:hover { background: var(--panel-2); color: var(--text); }
+.db { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+.db .sub { display: flex; flex-direction: column; gap: 8px; }
+.label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); font-weight: 600; }
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.kv span { color: var(--muted); } .kv b { font-weight: 600; text-align: right; }
+.list { display: flex; flex-direction: column; font-size: 12px; }
+.li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.li:last-child { border-bottom: 0; }
+.li .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li .r { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.li .r b { color: var(--text); font-weight: 600; }
+.ag { font: 500 10.5px/1.6 var(--mono); color: var(--muted); background: var(--panel-2); padding: 0 5px; border-radius: 3px; white-space: nowrap; }
+.bd { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.bd.idle { background: var(--panel-3); }
+.spark { display: block; width: 100%; height: 40px; }
+.stack { display: flex; height: 10px; gap: 2px; }
+.stack i { display: block; height: 100%; }
+.stack i:first-child { border-radius: 3px 0 0 3px; } .stack i:last-child { border-radius: 0 3px 3px 0; }
+.tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+  padding: 8px 10px; font-size: 12px; min-width: 190px; max-width: 330px; box-shadow: 0 8px 24px var(--shadow); z-index: 30; }
+.tip .th { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; margin-bottom: 4px; }
+.tip .th span { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.tip .trr { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto 34px; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; line-height: 1.6; }
+.tip .trr > span:nth-child(2) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tip .trr .p { color: var(--dim); text-align: right; }
+.tip .tf { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tip .tf b { color: var(--ok); font-weight: 600; }
+.tip .kv { margin-top: 2px; }
+.tip .ev { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 6px; line-height: 1.55; }
+.tip .ev .tm { color: var(--dim); font-variant-numeric: tabular-nums; }
+.tip .ev .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tip .ev .why { color: var(--muted); grid-column: 2 / -1; margin-top: -3px; }
+.dim { color: var(--dim); } .muted { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body class="balanced t-seats">
+<div class="top">
+  <h1>Claude</h1>
+  <div class="tabs" role="tablist">
+    <button class="tab on" data-tab="seats" role="tab">Seats</button>
+    <button class="tab" data-tab="usage" role="tab">Usage</button>
+  </div>
+  <div id="periodBox"><div class="seg xs" id="period"><button data-v="5h">5h</button><button data-v="today" class="on">Today</button><button data-v="7d">7d</button><button data-v="all">All</button></div></div>
+  <div class="spacer"></div>
+  <span class="live-top"><span class="pulse"></span> <span class="muted num" id="liveThreads"></span></span>
+  <div class="seg xs" id="density"><button data-v="compact">Compact</button><button data-v="balanced" class="on">Balanced</button></div>
+</div>
+
+<div id="app">
+  <div class="kstrip" id="kSeat"></div>
+  <div class="kstrip" id="kUse"></div>
+
+  <div class="blk" id="seats">
+    <div class="bubs" id="seatRows"></div>
+  </div>
+
+  <div class="blk" id="quota">
+    <div class="bh"><h2>Pool 5h capacity</h2><span class="fig" id="quotaFig"></span><div class="spacer"></div><div class="legend" id="quotaLegend"></div></div>
+    <div class="cw" id="quotaWrap"><svg id="quotaSvg"></svg></div>
+  </div>
+
+  <div class="blk" id="main">
+    <div class="bh"><h2 id="mainTitle">Throughput</h2><span class="fig" id="mainFig"></span><div class="spacer"></div>
+      <div class="seg xs" id="unit"><button data-v="tok" class="on">Tokens</button><button data-v="usd">$</button></div>
+      <div class="seg xs" id="split"><button data-v="type" class="on">Type</button><button data-v="seat">Seat</button></div><div class="seg xs" id="evSeg"><button data-v="on" title="Show cold cache and compactions on the curve">Cache events</button></div></div>
+    <div class="legend" id="chartLegend"></div>
+    <div class="cw" id="chartWrap"><svg id="chart"></svg></div>
+  </div>
+
+  <div id="side">
+    <div class="blk grow"><div class="bh"><h2>Leaderboard</h2><div class="spacer"></div><div class="seg xs" id="dpsBy"><button data-v="seat" class="on">Seats</button><button data-v="agent">Agents</button><button data-v="conv">Threads</button></div></div><div class="dps" id="dps"></div></div>
+    <div class="blk"><div class="bh"><h2>Where the $ goes</h2><span class="fig" id="splitFig"></span></div><div class="split" id="split2"></div></div>
+  </div>
+
+  <div id="events"></div>
+</div>
+
+<aside class="drawer" id="drawer" hidden>
+  <div class="dh"><h3 id="dTitle"></h3><span class="dim" id="dSub"></span><div class="spacer"></div><button class="x" id="dClose" aria-label="Close">×</button></div>
+  <div class="db" id="dBody"></div>
+</aside>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const D = {"perMin":[0,0,34286,0,0,0,0,0,0,0,38166,0,0,0,0,0,0,3466,452368,1482149,7802290,10638074,9568889,8656630,6641583,6184197,3720027,10421206,8302533,6876065,5965385,3077336,3657450,8025772,10097086,10529242,7795883,5857396,7379754,6815655,9512657,2169052,2627202,1496315,2080146,4184382,2160047,1226801,4556068,3553875,2397478,6121440,6946893,4651497,2687342,5788359,5112624,2982131,1003743,0],"now":1791610258192,"day0":1791583200000,"firstAt":1791476684105,"prices":{"opus":[4,20,0.2,8,5],"fable":[10,50,0.25,20,12.5],"sonnet":[2,10,0.2,4,2.5],"haiku":[1,5,0.1,2,1.25],"opus45":[5,25,0.5,10,6.25]},"seats":[{"id":"fabrisek-gmail-com","label":"fabrisek@gmail.com","org":"perso","plan":"MAX","priority":8,"lastResort":true,"advisor":true,"five":{"pct":27,"resetsAt":1791624000000},"week":{"pct":97,"resetsAt":1791651600000},"fableWeek":{"pct":0,"resetsAt":1791651600161},"requests":3147,"exhaustedUntil":1791603520754,"lastUsedAt":1791610185134,"hitsToday":0,"todayTok":220039099,"todayUsd":250.79,"threads":[{"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","agent":"dev","title":"Ok j'aimerais améliorer les differentes pages de low poly av","ctx":57037,"at":1791610184283,"busy":true},{"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","agent":"alfred","title":"Ok j'aimerais améliorer les differentes pages de low poly av","ctx":57849,"at":1791610144264,"busy":true},{"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","agent":"pm","title":"Ok j'aimerais améliorer les differentes pages de low poly av","ctx":23272,"at":1791610138203,"busy":true},{"conv":"022b95a1-dbfc-490c-8023-53bfb44324de","agent":"testeur","title":"Ok j'ai un bug, avec la minimap et les zaap, ainsi que la ro","ctx":195707,"at":1791610127462,"busy":true},{"conv":"e8afcb97-be74-41d9-b8dd-78a74dd4e9ee","agent":"alfred","title":"Ok il va falloir faire une bonne maj sur le printer, deja le","ctx":61757,"at":1791610094506,"busy":false},{"conv":"par-t-afb167aa-mv1tfvol","agent":"dev","title":"Redesign T73 — Docs hero DA (static facet, lift, MCP action buttons look)","ctx":130166,"at":1791610089966,"busy":false},{"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","agent":"alfred","title":"Ok récupére la derniére version de sightprice sur git et ega","ctx":98758,"at":1791610077200,"busy":false},{"conv":"par-t-95926f2a-mv1tac3a","agent":"dev","title":"Redesign T55 — generation_cta block DA look (static facet, fade + buttons up)","ctx":0,"at":1791609990203,"busy":false},{"conv":"par-r-fd5e22fb-mv1u3i90","agent":"pm","title":"Board: tech-debt task for vite buildStart plugins ignoring --outDir","ctx":59391,"at":1791609967921,"busy":false}],"spark":[0,0,0,0,0,0,0,0,0,269658,0,0,0,104766577,53672821,61330043]},{"id":"claude-standard3","label":"claude-standard3","org":"team","plan":"STD","priority":3,"lastResort":false,"advisor":false,"five":{"pct":5,"resetsAt":1791625800000},"week":null,"fableWeek":null,"requests":1012,"exhaustedUntil":1791607800000,"lastUsedAt":1791610046413,"hitsToday":2,"todayTok":107088941,"todayUsd":41.46,"threads":[{"conv":"par-t-4f02b79d-mv1ycfeb","agent":"lecteur","title":"Bug: internet access from Alfred appears broken","ctx":30066,"at":1791610046341,"busy":true}],"spark":[13825,0,0,0,853492,6560146,3782559,10562314,32550227,2693088,17574111,29469302,24126430,0,181534,494249]},{"id":"claude-standard2","label":"claude-standard2","org":"team","plan":"STD","priority":2,"lastResort":false,"advisor":false,"five":{"pct":27,"resetsAt":1791625800000},"week":null,"fableWeek":null,"requests":1059,"exhaustedUntil":1791607800231,"lastUsedAt":1791610082663,"hitsToday":2,"todayTok":52841307,"todayUsd":47.01,"threads":[{"conv":"par-t-f41c9cfb-mv1x2hfb","agent":"dev","title":"Redesign T68 — Plan cards subgrid alignment (CTA row aligned)","ctx":60625,"at":1791610089314,"busy":false}],"spark":[0,0,0,0,8252132,8061690,0,0,8734945,18785913,15165808,0,0,232516,2103052,7819073]},{"id":"claude-standard1","label":"claude-standard1","org":"team","plan":"STD","priority":1,"lastResort":false,"advisor":false,"five":{"pct":44,"resetsAt":1791625200000},"week":null,"fableWeek":null,"requests":1480,"exhaustedUntil":1791607200000,"lastUsedAt":1791610055605,"hitsToday":2,"todayTok":49870310,"todayUsd":34.67,"threads":[{"conv":"e8afcb97-be74-41d9-b8dd-78a74dd4e9ee","agent":"testeur","title":"Ok il va falloir faire une bonne maj sur le printer, deja le","ctx":112457,"at":1791610073075,"busy":true},{"conv":"par-t-031a20e8-mv1t246s","agent":"dev","title":"lowpoly — restore local JS bundles (npm run build) after stale-chunk wipe","ctx":178673,"at":1791610062234,"busy":false}],"spark":[0,0,0,0,2051683,47335335,1026403,0,4462266,9676054,7045903,4918350,3093645,2200667,5234740,13238685]},{"id":"claude-standard","label":"claude-standard","org":"team","plan":"STD","priority":0,"lastResort":false,"advisor":false,"five":{"pct":2,"resetsAt":1791624600000},"week":null,"fableWeek":null,"requests":1163,"exhaustedUntil":1791606600000,"lastUsedAt":1791610044187,"hitsToday":2,"todayTok":57188601,"todayUsd":30.36,"threads":[{"conv":"par-t-98ff5be0-mv1ycfdp","agent":"lecteur","title":"Web viewer: agents (Claude CLI) cannot open or drive the built-in viewer","ctx":35254,"at":1791610047832,"busy":false}],"spark":[0,0,0,0,8977805,5460299,0,6550633,9170634,9723870,27992677,0,9715718,326628,134913,124161]},{"id":"claude-premium","label":"claude-premium","org":"team","plan":"PRM","priority":4,"lastResort":false,"advisor":true,"five":{"pct":5,"resetsAt":1791625800000},"week":null,"fableWeek":{"pct":0,"resetsAt":1791720000000},"requests":4851,"exhaustedUntil":1791607801211,"lastUsedAt":1791610182683,"hitsToday":0,"todayTok":286802845,"todayUsd":256.35,"threads":[{"conv":"1eefa99d-1db6-4d45-80aa-718f2a8b229c","agent":"lecteur","title":"Ok alors on va améliorer drastiquement alfred, normalemetn c","ctx":106661,"at":1791610182671,"busy":true}],"spark":[39394663,0,0,0,1189772,38307150,10763208,30446565,84252240,42318218,60323525,34950526,54906134,2559192,3107054,4385956]},{"id":"claude-premium2","label":"claude-premium2","org":"team","plan":"PRM","priority":7,"lastResort":false,"advisor":true,"five":{"pct":24,"resetsAt":1791624000000},"week":null,"fableWeek":{"pct":0,"resetsAt":1791705600000},"requests":3080,"exhaustedUntil":1791606049172,"lastUsedAt":1791610123644,"hitsToday":1,"todayTok":223330960,"todayUsd":199.96,"threads":[{"conv":"par-t-00d9e5ac-mv1t246d","agent":"dev","title":"Redesign T56 — Asset detail grid per breakpoint + wide container + sticky aside","ctx":60354,"at":1791610133542,"busy":false},{"conv":"par-t-7b1c5c75-mv1tfvpb","agent":"dev","title":"Redesign T53 — One chip language (pills, tags, sort tabs) + sort-pill morph","ctx":124842,"at":1791610095158,"busy":false},{"conv":"par-t-8a569e4e-mv1t246j","agent":"dev","title":"Redesign T36 — Bento asset-library tile art = 4 real posters (+ hover fan-out)","ctx":208445,"at":1791610078119,"busy":false},{"conv":"1eefa99d-1db6-4d45-80aa-718f2a8b229c","agent":"alfred","title":"Ok alors on va améliorer drastiquement alfred, normalemetn c","ctx":34615,"at":1791610029663,"busy":true}],"spark":[73876487,0,0,0,0,0,0,0,0,41141011,76103496,17610241,23218704,11415072,15666589,38175847]},{"id":"claude-premium1","label":"claude-premium1","org":"team","plan":"PRM","priority":6,"lastResort":false,"advisor":true,"five":{"pct":19,"resetsAt":1791621000000},"week":null,"fableWeek":{"pct":0,"resetsAt":1791788400000},"requests":4417,"exhaustedUntil":1791603715631,"lastUsedAt":1791610004716,"hitsToday":1,"todayTok":291061109,"todayUsd":287.08,"threads":[{"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","agent":"testeur","title":"Ok récupére la derniére version de sightprice sur git et ega","ctx":110276,"at":1791610044493,"busy":true}],"spark":[52478748,3415521,0,0,0,0,0,0,35492744,113038944,23812691,49785286,44174869,4749216,3387867,16619492]},{"id":"contact","label":"contact","org":"team","plan":"PRM","priority":5,"lastResort":false,"advisor":true,"five":{"pct":15,"resetsAt":1791624600000},"week":null,"fableWeek":{"pct":0,"resetsAt":1792051199541},"requests":6363,"exhaustedUntil":1791606600000,"lastUsedAt":1791610061348,"hitsToday":2,"todayTok":319976371,"todayUsd":266.18,"threads":[{"conv":"par-t-4e6014c2-mv1t245q","agent":"dev","title":"Redesign T25 — Post TOC (details <1440, sticky rail ≥1440) + active indicator","ctx":105341,"at":1791610069669,"busy":false}],"spark":[5556451,0,3652598,855709,54253815,7777700,28033883,72029722,106705481,57771262,63964498,12079717,29887506,14155786,11105546,24306575]}],"hourly":[{"t":1791475200000,"tot":[3470,870878,1210510,72834,0.0171,6.4068,0.33,1.4626,123,10.0885,0,0],"seat":{"contact":[146,621714,821278,67284,0.0006,4.8639,0.1643,1.3456,73,7.0633,0,0],"unknown":[3324,249164,389232,5550,0.0165,1.5429,0.1657,0.117,50,3.0252,0,0]},"model":{"opus":[144,594270,821278,67280,0.0006,4.7542,0.1643,1.3456,72,7.0084,0,0],"sonnet":[2,27444,0,4,0,0.1098,0,0,1,0.0549,0,0],"opus45":[3306,246286,317025,4462,0.0165,1.5393,0.1585,0.1116,44,2.9446,0,0],"haiku":[18,2878,72207,1088,0,0.0036,0.0072,0.0054,6,0.0805,0,0]},"agent":{"engine":[3470,870878,1210510,72834,0.0171,6.4068,0.33,1.4626,123,10.0885,0,0]}},{"t":1791478800000,"tot":[478,1695956,4250872,41867,0.0017,13.5847,0.8334,0.8265,209,24.1218,0,0],"seat":{"contact":[474,1638594,4235431,41856,0.0017,13.1258,0.8303,0.8263,207,23.8303,0,0],"fabrisek-gmail-com":[4,57362,15441,11,0,0.4589,0.0031,0.0002,2,0.2914,0,0]},"model":{"haiku":[76,69669,167418,733,0.0001,0.1393,0.0167,0.0037,8,0.2408,0,0],"opus":[394,1517477,4083454,41118,0.0016,12.1398,0.8167,0.8224,197,23.2277,0,0],"sonnet":[4,54418,0,8,0,0.2177,0,0.0001,2,0.1089,0,0],"fable":[4,54392,0,8,0,1.0878,0,0.0004,2,0.5444,0,0]},"agent":{"dev":[56,29938,167418,644,0.0001,0.0599,0.0167,0.0032,6,0.2006,0,0],"engine":[306,1071392,2052097,32739,0.0012,8.7678,0.4104,0.6536,145,13.2471,0,0],"alfred":[88,481006,1564658,5353,0.0004,3.848,0.3129,0.1071,44,8.2901,0,0],"lecteur":[28,113620,466699,3131,0.0001,0.909,0.0933,0.0626,14,2.384,0,0]}},{"t":1791482400000,"tot":[552,3532193,5632797,222382,0.0016,25.7225,1.0945,4.3362,226,32.1879,0,0],"seat":{"contact":[382,2743005,3494732,57747,0.001,20.3043,0.6669,1.0728,142,19.8139,0,0],"fabrisek-gmail-com":[170,789188,2138065,164635,0.0006,5.4182,0.4276,3.2634,84,12.374,0,0]},"model":{"opus":[292,2825981,2008612,212069,0.0012,22.6078,0.4017,4.2414,145,23.5809,0,0],"sonnet":[134,627215,3303775,8609,0.0003,2.4559,0.6608,0.0861,67,7.9483,0,0],"haiku":[124,51177,320410,1700,0.0001,0.1024,0.032,0.0085,13,0.3802,0,0],"fable":[2,27820,0,4,0,0.5564,0,0.0002,1,0.2784,0,0]},"agent":{"engine":[290,2816283,1992701,212065,0.0012,22.5303,0.3985,4.2413,144,23.4784,0,0],"chat":[120,83734,342808,1938,0.0001,0.7537,0.0383,0.0118,15,0.804,0,0],"cli-helper":[10,18611,18098,153,0,0.0372,0.0018,0.0008,1,0.0375,0,0],"cli-tester":[132,613565,3279190,8226,0.0003,2.4013,0.6558,0.0823,66,7.868,0,0]}},{"t":1791486000000,"tot":[936,15809245,5289191,772421,0.0037,126.474,1.0578,15.4484,465,99.8459,0,0],"seat":{"contact":[568,8629213,3374521,653023,0.0023,69.0337,0.6749,13.0605,281,61.0777,0,0],"claude-standard3":[174,2268613,981928,59941,0.0007,18.1489,0.1964,1.1988,87,14.2017,0,0],"fabrisek-gmail-com":[194,4911419,932742,59457,0.0008,39.2914,0.1865,1.1891,97,24.5666,0,0]},"model":{"opus":[936,15809245,5289191,772421,0.0037,126.474,1.0578,15.4484,465,99.8459,0,0]},"agent":{"engine":[936,15809245,5289191,772421,0.0037,126.474,1.0578,15.4484,465,99.8459,0,0]}},{"t":1791489600000,"tot":[1040,25888707,5652204,251075,0.0036,206.9177,1.0409,4.9411,450,128.3252,0,0],"seat":{"claude-standard1":[48,2545609,279732,24501,0.0002,20.3649,0.0559,0.49,24,11.7916,0,0],"claude-standard":[64,2384841,326467,13177,0.0003,19.0787,0.0653,0.2635,32,11.109,0,0],"claude-standard2":[142,2315563,811847,30734,0.0006,18.5245,0.1624,0.6147,71,13.1249,0,0],"claude-premium":[266,8928322,1436210,76723,0.0011,71.4266,0.2872,1.5345,133,42.9937,0,0],"fabrisek-gmail-com":[520,9714372,2797948,105940,0.0015,77.523,0.47,2.0384,190,49.3061,0,0]},"model":{"opus":[856,25856715,4756491,245713,0.0034,206.8537,0.9513,4.9143,428,127.3705,0,0],"haiku":[184,31992,895713,5362,0.0002,0.064,0.0896,0.0268,22,0.9547,0,0]},"agent":{"engine":[866,25859689,4773850,246906,0.0034,206.8597,0.953,4.9202,429,127.3968,0,0],"cli-helper":[174,29018,878354,4169,0.0002,0.058,0.0878,0.0208,21,0.9284,0,0]}},{"t":1791493200000,"tot":[608,5659014,1887684,57540,0.0013,44.5664,0.3091,1.0191,148,28.8014,0,0],"seat":{"claude-standard3":[92,2401734,478756,25269,0.0004,19.2139,0.0958,0.5054,46,12.0277,0,0],"claude-premium":[56,2825274,314929,15291,0.0002,22.6022,0.063,0.3058,28,12.8669,0,0],"claude-premium1":[460,432006,1093999,16980,0.0007,2.7503,0.1504,0.2079,74,3.9069,0,0]},"model":{"opus":[218,5541392,1203413,48758,0.0009,44.3311,0.2407,0.9752,109,27.9553,0,0],"haiku":[390,117622,684271,8782,0.0004,0.2352,0.0684,0.0439,39,0.8462,0,0]},"agent":{"engine":[608,5659014,1887684,57540,0.0013,44.5664,0.3091,1.0191,148,28.8014,0,0]}},{"t":1791496800000,"tot":[556,728949,9118892,111779,0.0018,5.1836,1.7957,2.1843,218,40.411,0,0],"seat":{"claude-premium1":[556,728949,9118892,111779,0.0018,5.1836,1.7957,2.1843,218,40.411,0,0]},"model":{"opus":[406,620957,8838055,108361,0.0016,4.9677,1.7676,2.1672,203,40.0049,0,0],"haiku":[150,107992,280837,3418,0.0001,0.216,0.0281,0.0171,15,0.4061,0,0]},"agent":{"engine":[556,728949,9118892,111779,0.0018,5.1836,1.7957,2.1843,218,40.411,0,0]}},{"t":1791500400000,"tot":[1160,1479967,28503865,306538,0.0046,11.5688,5.7342,6.1381,576,126.1628,0,0],"seat":{"claude-premium1":[784,1006634,19609888,233385,0.0031,8.0531,3.922,4.6677,392,87.1369,0,0],"fabrisek-gmail-com":[336,361053,8742726,69599,0.0013,2.8884,1.7485,1.392,168,37.8084,0,0],"unknown":[40,112280,151251,3554,0.0002,0.6273,0.0637,0.0784,16,1.2175,0,0]},"model":{"opus":[1120,1367687,28352614,302984,0.0045,10.9415,5.6705,6.0597,560,124.9454,0,0],"opus45":[31,97383,121457,3033,0.0002,0.6086,0.0607,0.0758,13,1.1702,0,0],"haiku":[9,14897,29794,521,0,0.0186,0.003,0.0026,3,0.0473,0,0]},"agent":{"engine":[1160,1479967,28503865,306538,0.0046,11.5688,5.7342,6.1381,576,126.1628,0,0]}},{"t":1791504000000,"tot":[2550,3056717,102056391,757590,0.0102,24.4537,20.4113,15.1518,1275,435.6144,0,0],"seat":{"claude-premium1":[1398,1748478,58886232,469910,0.0056,13.9878,11.7772,9.3982,699,251.9426,0,0],"fabrisek-gmail-com":[1152,1308239,43170159,287680,0.0046,10.4659,8.634,5.7536,576,183.6718,0,0]},"model":{"opus":[2550,3056717,102056391,757590,0.0102,24.4537,20.4113,15.1518,1275,435.6144,0,0]},"agent":{"engine":[2550,3056717,102056391,757590,0.0102,24.4537,20.4113,15.1518,1275,435.6144,0,0]}},{"t":1791507600000,"tot":[5859,1979817,39096016,462333,0.01,14.9548,7.7927,9.0813,726,172.1569,0,0],"seat":{"claude-standard":[354,298042,2755511,42001,0.0008,1.7936,0.5285,0.7532,101,11.9961,0,0],"fabrisek-gmail-com":[42,71367,1719104,21611,0.0002,0.5709,0.3438,0.4322,21,7.5943,0,0],"contact":[720,662192,24139217,207444,0.0029,5.2975,4.8278,4.1489,360,103.3574,0,0],"claude-standard1":[126,166213,1745079,40810,0.0005,1.3297,0.349,0.8162,63,8.4619,0,0],"claude-standard2":[4441,265213,3328797,64252,0.0049,1.8287,0.6618,1.2065,93,15.3218,0,0],"claude-premium1":[176,516790,5408308,86215,0.0007,4.1343,1.0817,1.7243,88,25.4254,0,0]},"model":{"haiku":[4487,147295,265275,11025,0.0045,0.2946,0.0265,0.0551,40,0.4722,0,0],"opus":[1372,1832522,38830741,451308,0.0055,14.6602,7.7661,9.0262,686,171.6847,0,0]},"agent":{"orphancli":[74,92394,202264,2104,0.0001,0.3448,0.0202,0.0118,9,0.3866,0,0],"engine":[5785,1887423,38893752,460229,0.0099,14.6099,7.7724,9.0694,717,171.7703,0,0]}},{"t":1791511200000,"tot":[1990,3073997,59029221,808468,0.0071,24.2785,11.7971,16.0935,878,264.0929,0,0],"seat":{"claude-standard1":[778,1134603,29852755,307610,0.0031,9.0768,5.9706,6.1522,389,130.1047,0,0],"claude-standard":[706,1064655,21891747,260073,0.0028,8.5172,4.3783,5.2015,353,97.0299,0,0],"claude-standard3":[6,18844,24856,128310,0,0.1508,0.005,2.5662,2,2.741,0,0],"claude-standard2":[238,483610,6011424,79669,0.0008,3.85,1.2004,1.5889,103,27.5044,0,0],"claude-premium1":[12,323192,1179168,28048,0,2.5855,0.2358,0.561,6,6.5704,0,0],"contact":[250,49093,69271,4758,0.0003,0.0982,0.0069,0.0238,25,0.1424,0,0]},"model":{"opus":[1700,3021750,58941288,803409,0.0068,24.174,11.7883,16.0682,849,263.9271,0,0],"haiku":[290,52247,87933,5059,0.0003,0.1045,0.0088,0.0253,29,0.1658,0,0]},"agent":{"engine":[1990,3073997,59029221,808468,0.0071,24.2785,11.7971,16.0935,878,264.0929,0,0]}},{"t":1791514800000,"tot":[1706,3277744,56865709,463775,0.0068,26.1391,11.3731,9.2755,834,270.6911,1823712,20.8349],"seat":{"contact":[658,1656765,24424570,164008,0.0026,13.1826,4.8849,3.2802,315,124.1541,1422068,16.546],"claude-standard3":[498,480843,15144388,115420,0.002,3.8467,3.0289,2.3084,249,64.8113,0,0],"claude-standard2":[502,705537,15870598,162192,0.002,5.6443,3.1741,3.2438,251,69.5504,0,0],"claude-premium":[2,3498,11499,77,0,0.028,0.0023,0.0015,1,0.0615,0,0],"claude-premium1":[24,374090,1286289,21118,0.0001,2.9851,0.2573,0.4224,10,10.712,344939,3.648],"fabrisek-gmail-com":[6,18418,33190,264,0,0.1458,0.0066,0.0053,2,0.4271,18849,0.2154],"claude-premium2":[16,38593,95175,696,0.0001,0.3066,0.019,0.0139,6,0.9746,37856,0.4255]},"model":{"opus":[1706,3277744,56865709,463775,0.0068,26.1391,11.3731,9.2755,834,249.8561,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,20.8349,1823712,20.8349]},"agent":{"engine":[1706,3277744,56865709,463775,0.0068,26.1391,11.3731,9.2755,834,270.6911,1823712,20.8349]}},{"t":1791518400000,"tot":[3188,5438312,96211949,976743,0.0128,43.4339,19.2424,19.5349,1574,439.8857,1117427,13.737],"seat":{"contact":[1692,2926130,54008324,479727,0.0068,23.3437,10.8017,9.5945,830,249.5835,992704,12.2444],"claude-standard3":[48,85095,455239,12174,0.0002,0.6808,0.091,0.2435,24,2.405,0,0],"claude-premium":[334,657303,10233807,234594,0.0013,5.2553,2.0468,4.6919,165,48.8333,44329,0.5757],"claude-premium1":[534,929882,19118544,140308,0.0021,7.4391,3.8237,2.8062,267,83.002,0,0],"claude-premium2":[580,839902,12396035,109940,0.0023,6.7151,2.4792,2.1988,288,56.0619,80394,0.917]},"model":{"opus":[3188,5438312,96211949,976743,0.0128,43.4339,19.2424,19.5349,1574,426.1487,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,13.737,1117427,13.737]},"agent":{"engine":[2580,4434668,69687450,765826,0.0103,35.4048,13.9375,15.3165,1270,325.5523,1117427,13.737],"chat":[608,1003644,26524499,210917,0.0024,8.0292,5.3049,4.2183,304,114.3333,0,0]}},{"t":1791522000000,"tot":[3336,4540160,66467709,1034304,0.0133,36.236,13.2935,20.6861,1645,319.4529,1185338,14.722],"seat":{"contact":[1064,1593638,27342875,369316,0.0043,12.6985,5.4686,7.3863,519,131.8721,679763,8.7355],"claude-premium":[598,925821,9670005,135582,0.0024,7.3983,1.934,2.7116,297,46.3706,101684,1.2733],"claude-premium1":[888,1121578,14216672,352570,0.0036,8.9665,2.8433,7.0514,441,69.8128,123690,1.4049],"claude-premium2":[786,899123,15238157,176836,0.0031,7.1726,3.0476,3.5367,388,71.3974,280201,3.3084]},"model":{"opus":[3336,4540160,66467709,1034304,0.0133,36.236,13.2935,20.6861,1645,304.7309,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,14.722,1185338,14.722]},"agent":{"engine":[3336,4540160,66467709,1034304,0.0133,36.236,13.2935,20.6861,1645,319.4529,1185338,14.722]}},{"t":1791525600000,"tot":[3890,4936759,164614985,898486,0.0156,39.4346,32.923,17.9697,1934,706.3642,866054,10.1719],"seat":{"contact":[96,175950,5183105,37925,0.0004,1.391,1.0366,0.7585,46,24.0452,159375,1.8501],"claude-standard3":[2,3101,10615,107,0,0.0248,0.0021,0.0021,1,0.057,0,0],"claude-premium":[1178,1686750,37501272,205463,0.0047,13.494,7.5003,4.1093,589,160.8661,0,0],"claude-premium1":[1514,1698177,49869024,298401,0.0061,13.5493,9.9738,5.968,749,219.3646,611632,7.1217],"claude-premium2":[1100,1372781,72050969,356590,0.0044,10.9755,14.4102,7.1318,549,302.0313,95047,1.2001]},"model":{"opus":[3890,4936759,164614985,898486,0.0156,39.4346,32.923,17.9697,1934,696.1923,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,10.1719,866054,10.1719]},"agent":{"engine":[3600,4606785,131921649,785984,0.0144,36.7948,26.3843,15.7197,1789,572.0198,866054,10.1719],"chat":[290,329974,32693336,112502,0.0012,2.6398,6.5387,2.25,145,134.3444,0,0]}},{"t":1791529200000,"tot":[42,36565,3143617,21610,0.0002,0.2882,0.6287,0.4322,20,15.3344,213687,2.1814],"seat":{"claude-premium1":[42,36565,3143617,21610,0.0002,0.2882,0.6287,0.4322,20,15.3344,213687,2.1814]},"model":{"opus":[42,36565,3143617,21610,0.0002,0.2882,0.6287,0.4322,20,13.1531,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,2.1814,213687,2.1814]},"agent":{"engine":[42,36565,3143617,21610,0.0002,0.2882,0.6287,0.4322,20,15.3344,213687,2.1814]}},{"t":1791554400000,"tot":[200,324656,3143419,46814,0.0008,2.5896,0.6287,0.9363,97,16.4301,137509,1.6207],"seat":{"contact":[200,324656,3143419,46814,0.0008,2.5896,0.6287,0.9363,97,16.4301,137509,1.6207]},"model":{"opus":[200,324656,3143419,46814,0.0008,2.5896,0.6287,0.9363,97,14.8094,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,1.6207,137509,1.6207]},"agent":{"engine":[200,324656,3143419,46814,0.0008,2.5896,0.6287,0.9363,97,16.4301,137509,1.6207]}},{"t":1791565200000,"tot":[32,64687,688487,6048,0.0001,0.5098,0.1377,0.121,14,4.3722,96455,1.2384],"seat":{"contact":[32,64687,688487,6048,0.0001,0.5098,0.1377,0.121,14,4.3722,96455,1.2384]},"model":{"opus":[32,64687,688487,6048,0.0001,0.5098,0.1377,0.121,14,3.1338,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,1.2384,96455,1.2384]},"agent":{"engine":[32,64687,688487,6048,0.0001,0.5098,0.1377,0.121,14,4.3722,96455,1.2384]}},{"t":1791568800000,"tot":[1730,2750929,71507838,532736,0.0069,21.9428,14.3016,10.6547,845,317.6568,785466,9.9601],"seat":{"contact":[1092,1526544,51638285,373965,0.0044,12.1581,10.3277,7.4793,530,229.1489,713929,9.0059],"claude-standard1":[32,274182,1754547,22922,0.0001,2.1935,0.3509,0.4584,16,8.5735,0,0],"claude-standard":[170,289203,8658912,29520,0.0007,2.3136,1.7318,0.5904,85,36.3835,0,0],"claude-standard3":[68,84271,756323,12830,0.0003,0.6742,0.1513,0.2566,34,3.6192,0,0],"claude-standard2":[284,411144,7770181,70523,0.0011,3.2892,1.554,1.4105,142,34.1369,0,0],"claude-premium":[84,165585,929590,22976,0.0003,1.3143,0.1859,0.4595,38,5.7948,71537,0.9543]},"model":{"opus":[1730,2750929,71507838,532736,0.0069,21.9428,14.3016,10.6547,845,307.6967,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,9.9601,785466,9.9601]},"agent":{"engine":[1730,2750929,71507838,532736,0.0069,21.9428,14.3016,10.6547,845,317.6568,785466,9.9601]}},{"t":1791572400000,"tot":[1570,1841146,110301828,401031,0.0063,14.6737,22.0604,8.0206,774,467.6572,956745,11.0584],"seat":{"contact":[282,489312,6913481,73284,0.0011,3.8884,1.3827,1.4657,136,34.6176,301341,3.5397],"claude-standard1":[314,573778,46631135,130108,0.0013,4.5902,9.3262,2.6022,157,191.4231,0,0],"claude-standard":[62,19402,5432189,8646,0.0002,0.1552,1.0864,0.1729,31,21.9795,0,0],"claude-standard3":[202,238119,6287032,34793,0.0008,1.905,1.2574,0.6959,101,26.7973,0,0],"claude-standard2":[108,54784,7977242,29556,0.0004,0.4383,1.5954,0.5911,54,32.7197,0,0],"claude-premium":[602,465751,37060749,124644,0.0024,3.6967,7.4121,2.4929,295,160.12,655404,7.5188]},"model":{"opus":[1570,1841146,110301828,401031,0.0063,14.6737,22.0604,8.0206,774,456.5988,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,11.0584,956745,11.0584]},"agent":{"engine":[1570,1841146,110301828,401031,0.0063,14.6737,22.0604,8.0206,774,467.6572,956745,11.0584]}},{"t":1791576000000,"tot":[728,719293,41656094,179299,0.0029,5.7122,8.3312,3.586,353,185.488,1050639,12.3976],"seat":{"contact":[358,357389,26929947,82270,0.0014,2.8372,5.386,1.6454,173,118.218,663919,7.4218],"claude-standard1":[6,4892,1018152,3353,0,0.0391,0.2036,0.0671,3,4.1593,0,0],"claude-standard3":[70,51498,3698917,32074,0.0003,0.412,0.7398,0.6415,35,15.6434,0,0],"claude-premium":[294,305514,10009078,61602,0.0012,2.4238,2.0018,1.232,142,47.4673,386720,4.9758]},"model":{"opus":[728,719293,41656094,179299,0.0029,5.7122,8.3312,3.586,353,173.0904,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,12.3976,1050639,12.3976]},"agent":{"engine":[728,719293,41656094,179299,0.0029,5.7122,8.3312,3.586,353,185.488,1050639,12.3976]}},{"t":1791579600000,"tot":[1874,2916827,113433621,860764,0.0075,23.2483,22.6867,17.2153,918,509.3338,2376148,26.7092],"seat":{"contact":[886,1349461,68293035,272784,0.0035,10.7275,13.6586,5.4557,430,307.4092,2113556,23.38],"claude-standard":[162,240487,6138452,171532,0.0006,1.9239,1.2277,3.4306,80,28.947,0,0],"claude-standard3":[126,233279,10276794,52115,0.0005,1.8662,2.0554,1.0423,63,43.0831,0,0],"claude-premium":[700,1093600,28725340,364333,0.0028,8.7306,5.7451,7.2867,345,129.8944,262592,3.3292]},"model":{"opus":[1874,2916827,113433621,860764,0.0075,23.2483,22.6867,17.2153,918,482.6246,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,26.7092,2376148,26.7092]},"agent":{"engine":[1874,2916827,113433621,860764,0.0075,23.2483,22.6867,17.2153,918,509.3338,2376148,26.7092]}},{"t":1791583200000,"tot":[4422,8470242,267038828,1348782,0.0177,67.6575,53.4078,26.9756,2190,1177.8724,4506263,48.8428],"seat":{"contact":[1500,2491332,101042660,510237,0.006,19.8794,20.2085,10.2047,740,452.8472,2659752,28.5005],"claude-standard1":[132,247965,4199745,14424,0.0005,1.9837,0.8399,0.2885,66,18.0798,0,0],"claude-standard":[240,270679,8855215,44500,0.001,2.1654,1.771,0.89,120,37.3945,0,0],"claude-standard3":[208,766741,31672786,110492,0.0008,6.1339,6.3346,2.2098,104,131.9688,0,0],"claude-standard2":[238,959423,7699431,75853,0.001,7.6754,1.5399,1.5171,119,36.1534,0,0],"claude-premium":[1738,3219867,79762153,500672,0.007,25.7238,15.9524,10.0134,863,350.9144,767810,8.9659],"claude-premium1":[366,514235,33806838,92604,0.0015,4.0958,6.7614,1.8521,178,150.5142,1078701,11.3764]},"model":{"opus":[4422,8470242,267038828,1348782,0.0177,67.6575,53.4078,26.9756,2190,1129.0296,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,48.8428,4506263,48.8428]},"agent":{"engine":[4422,8470242,267038828,1348782,0.0177,67.6575,53.4078,26.9756,2190,1177.8724,4506263,48.8428]}},{"t":1791586800000,"tot":[5328,12992617,272275350,1591415,0.0213,103.7736,54.4551,31.8283,2632,1262.7085,8553308,89.787],"seat":{"contact":[1468,2270604,54381434,361396,0.0059,18.141,10.8763,7.2279,728,242.222,756360,8.38],"claude-standard1":[492,486622,9111504,77436,0.002,3.893,1.8223,1.5487,246,39.9432,0,0],"claude-standard":[286,372284,9296841,54459,0.0011,2.9783,1.8594,1.0892,143,39.7668,0,0],"claude-standard3":[148,314323,2333573,45044,0.0006,2.5146,0.4667,0.9009,74,11.4931,0,0],"claude-standard2":[204,2494600,16220018,71091,0.0008,19.9568,3.244,1.4218,102,76.2811,0,0],"claude-premium":[986,1783789,38392639,261623,0.0039,14.2366,7.6785,5.2325,489,185.313,1879181,19.3709],"claude-premium1":[910,3386400,104003451,319570,0.0036,27.0024,20.8007,6.3914,438,491.6546,5328613,55.7001],"fabrisek-gmail-com":[16,89247,49342,131053,0.0001,0.714,0.0099,2.6211,7,3.1755,0,0],"claude-premium2":[818,1794748,38486548,269743,0.0033,14.3369,7.6973,5.3949,405,172.8593,589154,6.336]},"model":{"opus":[5328,12992617,272275350,1591415,0.0213,103.7736,54.4551,31.8283,2632,1172.9215,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,89.787,8553308,89.787]},"agent":{"engine":[5328,12992617,272275350,1591415,0.0213,103.7736,54.4551,31.8283,2632,1262.7085,8553308,89.787]}},{"t":1791590400000,"tot":[4118,9789450,272740783,1170610,0.0165,78.1924,54.5482,23.4122,2030,1239.9163,8277748,86.3667],"seat":{"contact":[1008,2823804,59390493,262780,0.004,22.5648,11.8781,5.2556,498,269.7671,1486413,15.6503],"claude-standard1":[280,245378,6738483,61762,0.0011,1.963,1.3477,1.2352,140,29.1718,0,0],"claude-standard":[286,366370,27525608,100413,0.0011,2.931,5.5051,2.0083,143,113.5773,0,0],"claude-standard3":[120,549549,17001091,23351,0.0005,4.3964,3.4002,0.467,60,70.6701,0,0],"claude-standard2":[50,41071,15105603,19084,0.0002,0.3286,3.0211,0.3817,25,60.9686,0,0],"claude-premium":[1230,2267283,55736074,385060,0.0049,18.1011,11.1472,7.7012,605,260.0239,1933878,20.3044],"claude-premium1":[446,911227,22159730,121546,0.0018,7.2722,4.4319,2.4309,220,101.3843,619742,6.6677],"claude-premium2":[698,2584768,69083701,196614,0.0028,20.6353,13.8167,3.9323,339,334.3533,4237715,43.7444]},"model":{"opus":[4118,9789450,272740783,1170610,0.0165,78.1924,54.5482,23.4122,2030,1153.5496,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,86.3667,8277748,86.3667]},"agent":{"engine":[3996,9443918,257275588,1027486,0.016,75.4282,51.4551,20.5497,1969,1173.8104,8277748,86.3667],"chat":[122,345532,15465195,143124,0.0005,2.7643,3.093,2.8625,61,66.1059,0,0]}},{"t":1791594000000,"tot":[2184,4329132,139126476,652457,0.0087,34.5574,27.8253,13.0491,1075,635.9142,4703173,49.0338],"seat":{"contact":[282,1036288,10709534,102034,0.0011,8.2756,2.1419,2.0407,138,51.7322,231579,2.7071],"claude-standard1":[172,183767,4692288,42123,0.0007,1.4701,0.9385,0.8425,86,20.3474,0,0],"claude-standard3":[112,96219,29337953,35018,0.0004,0.7698,5.8676,0.7004,56,118.4375,0,0],"claude-premium":[660,1140688,33446202,230251,0.0026,9.1211,6.6892,4.605,329,144.5189,132725,1.5637],"claude-premium1":[430,1127458,44979273,119955,0.0017,8.9808,8.9959,2.3991,207,223.3204,3558170,36.4926],"claude-premium2":[528,744712,15961226,123076,0.0021,5.94,3.1922,2.4615,259,77.5579,780699,8.2705]},"model":{"opus":[2184,4329132,139126476,652457,0.0087,34.5574,27.8253,13.0491,1075,586.8803,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,49.0338,4703173,49.0338]},"agent":{"engine":[2184,4329132,139126476,652457,0.0087,34.5574,27.8253,13.0491,1075,635.9142,4703173,49.0338]}},{"t":1791597600000,"tot":[3464,8681414,175092526,1203709,0.0139,69.3955,35.0185,24.0742,1720,802.2448,4141893,43.061],"seat":{"contact":[922,1163543,28211524,235589,0.0037,9.2926,5.6423,4.7118,457,125.3993,275928,3.1836],"claude-standard1":[162,220497,2837929,35057,0.0006,1.764,0.5676,0.7011,81,12.9355,0,0],"claude-standard":[30,629684,9076721,9283,0.0001,5.0375,1.8153,0.1857,15,39.0114,0,0],"claude-standard3":[80,65544,24027057,33749,0.0003,0.5244,4.8054,0.675,40,97.0457,0,0],"claude-premium":[1006,2867059,49942619,415434,0.004,22.9181,9.9885,8.3087,499,236.9264,1680016,17.375],"claude-premium1":[448,2479832,39431915,132003,0.0018,19.8203,7.8864,2.6401,221,192.1376,2130671,21.8488],"claude-premium2":[816,1255255,21564761,342594,0.0033,10.0387,4.313,6.8519,407,98.7889,55278,0.6537]},"model":{"opus":[3464,8681414,175092526,1203709,0.0139,69.3955,35.0185,24.0742,1720,759.1838,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,43.061,4141893,43.061]},"agent":{"engine":[3464,8681414,175092526,1203709,0.0139,69.3955,35.0185,24.0742,1720,802.2448,4141893,43.061]}},{"t":1791601200000,"tot":[4161,16975739,117260622,970333,0.0166,135.5386,23.445,19.4046,1712,609.3671,5194799,53.3234],"seat":{"contact":[408,1796749,11125625,149177,0.0016,14.3562,2.2251,2.9835,200,65.9567,1083827,11.282],"claude-standard1":[74,187451,1973893,39249,0.0003,1.4996,0.3948,0.785,37,9.4307,0,0],"claude-standard":[18,218093,107196,1321,0.0001,1.7447,0.0214,0.0264,9,1.3276,0,0],"claude-standard2":[8,183905,45066,3537,0,1.4712,0.009,0.0707,4,0.9867,0,0],"claude-premium":[90,448925,2078514,31663,0.0004,3.5914,0.4157,0.6333,45,10.7434,0,0],"fabrisek-gmail-com":[2871,12209791,87847000,595943,0.0114,97.4288,17.5622,11.9168,1071,453.8739,4110972,42.0414],"claude-premium1":[268,935490,3790562,22896,0.0011,7.4839,0.7581,0.4579,134,19.3632,0,0],"claude-premium2":[424,995335,10292766,126547,0.0017,7.9627,2.0586,2.5309,212,47.685,0,0]},"model":{"opus":[4131,16939651,117189089,970194,0.0165,135.4664,23.4378,19.4039,1709,555.9354,0,0],"haiku":[30,36088,71533,139,0,0.0722,0.0072,0.0007,3,0.1083,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,53.3234,5194799,53.3234]},"agent":{"engine":[4161,16975739,117260622,970333,0.0166,135.5386,23.445,19.4046,1712,609.3671,5194799,53.3234]}},{"t":1791604800000,"tot":[3973,4287290,89301427,635091,0.0092,33.733,17.8388,12.6015,899,389.7704,366335,4.4073],"seat":{"contact":[2267,563700,10460972,78607,0.0028,4.4136,2.0799,1.5173,94,45.2012,0,0],"claude-standard1":[102,298886,4897684,38068,0.0004,2.3911,0.9795,0.7614,51,21.548,0,0],"claude-standard3":[16,14702,161941,4875,0.0001,0.1176,0.0324,0.0975,8,0.8041,0,0],"claude-standard2":[94,112652,1967267,23039,0.0004,0.9012,0.3935,0.4608,47,8.7808,0,0],"claude-premium":[48,156818,2935485,14703,0.0002,1.2545,0.5871,0.2941,24,12.6635,0,0],"claude-premium1":[52,257884,3049841,45646,0.0002,2.058,0.61,0.9129,25,14.5831,34444,0.439],"claude-standard":[104,42068,91405,1336,0.0001,0.0841,0.0091,0.0067,11,0.1403,0,0],"fabrisek-gmail-com":[1014,2191379,50882323,311671,0.0041,17.5106,10.1765,6.2334,503,221.9547,286434,3.4224],"claude-premium2":[276,649201,14854509,117146,0.0011,5.0022,2.9709,2.3174,136,64.0947,45457,0.5459]},"model":{"opus":[1742,4182247,88741564,627551,0.007,33.4325,17.7483,12.551,866,384.2532,0,0],"haiku":[2207,58064,214598,4991,0.0022,0.1161,0.0215,0.025,23,0.2998,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,4.4073,366335,4.4073],"sonnet":[24,46979,345265,2549,0,0.1844,0.0691,0.0255,10,0.81,0,0]},"agent":{"engine":[3973,4287290,89301427,635091,0.0092,33.733,17.8388,12.6015,899,389.7704,366335,4.4073]}},{"t":1791608400000,"tot":[2942,4968022,160149176,1228927,0.0118,39.7349,32.0298,24.5785,1469,686.9002,145014,1.8411],"seat":{"contact":[312,363081,23799793,143389,0.0012,2.9046,4.76,2.8678,156,99.5205,0,0],"claude-standard1":[248,296770,12856823,84844,0.001,2.3742,2.5714,1.6969,124,54.3122,0,0],"claude-standard":[10,23457,99585,1109,0,0.1877,0.0199,0.0222,5,0.5144,0,0],"claude-standard3":[30,103258,384105,6856,0.0001,0.8261,0.0768,0.1371,15,2.0867,0,0],"claude-standard2":[148,222083,7530369,66473,0.0006,1.7767,1.5061,1.3295,74,32.3399,0,0],"claude-premium":[184,293677,4004941,37650,0.0007,2.345,0.801,0.753,91,18.6021,49504,0.6539],"claude-premium1":[274,429719,15959445,134544,0.0011,3.4329,3.1919,2.6909,136,69.4358,95510,1.1872],"fabrisek-gmail-com":[1144,2422777,58402775,503347,0.0046,19.3822,11.6806,10.0669,572,253.3737,0,0],"claude-premium2":[592,813200,37111340,250715,0.0024,6.5056,7.4223,5.0143,296,156.7148,0,0]},"model":{"opus":[2942,4968022,160149176,1228927,0.0118,39.7349,32.0298,24.5785,1469,685.0591,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,1.8411,145014,1.8411]},"agent":{"engine":[2942,4968022,160149176,1228927,0.0118,39.7349,32.0298,24.5785,1469,686.9002,145014,1.8411]}}],"daily":[{"d":"2026-10-08","tot":[7084,53455993,23923258,1418119,0.029,423.672,4.6658,28.0339,1621,323.3707,0,0],"model":{"haiku":[792,273338,2140019,17665,0.0008,0.5445,0.214,0.0883,88,2.5025,0,0],"opus":[2840,52145080,18162439,1387359,0.0114,417.1606,3.6325,27.7472,1416,308.9886,0,0],"sonnet":[140,709077,3303775,8621,0.0003,2.7833,0.6608,0.0862,70,8.1122,0,0],"opus45":[3306,246286,317025,4462,0.0165,1.5393,0.1585,0.1116,44,2.9446,0,0],"fable":[6,82212,0,12,0.0001,1.6442,0,0.0006,3,0.8228,0,0]},"seat":{"contact":[1570,13632526,11925962,819910,0.0055,107.3277,2.3364,16.3052,703,111.7852,0,0],"claude-standard1":[48,2545609,279732,24501,0.0002,20.3649,0.0559,0.49,24,11.7916,0,0],"claude-standard":[64,2384841,326467,13177,0.0003,19.0787,0.0653,0.2635,32,11.109,0,0],"claude-standard3":[266,4670347,1460684,85210,0.0011,37.3628,0.2921,1.7042,133,26.2294,0,0],"claude-standard2":[142,2315563,811847,30734,0.0006,18.5245,0.1624,0.6147,71,13.1249,0,0],"claude-premium":[322,11753596,1751139,92014,0.0013,94.0288,0.3502,1.8403,161,55.8605,0,0],"fabrisek-gmail-com":[888,15472341,5884196,330043,0.0029,122.6914,1.0873,6.4911,373,86.538,0,0],"claude-premium1":[460,432006,1093999,16980,0.0007,2.7503,0.1504,0.2079,74,3.9069,0,0],"unknown":[3324,249164,389232,5550,0.0165,1.5429,0.1657,0.117,50,3.0252,0,0]}},{"d":"2026-10-09","tot":[30411,37166525,965839641,7868318,0.1069,294.6475,193.138,157.0812,12681,4291.1044,10609180,124.6317],"model":{"haiku":[4936,322431,663839,20023,0.0049,0.6337,0.0664,0.1001,87,1.0913,0,0],"opus":[25444,36746711,965054345,7845262,0.1018,293.4051,193.0109,156.9052,12581,4164.2112,0,0],"opus45":[31,97383,121457,3033,0.0002,0.6086,0.0607,0.0758,13,1.1702,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,124.6317,10609180,124.6317]},"seat":{"claude-standard":[1454,1911789,44876811,511772,0.0052,14.7036,8.9528,10.1486,650,196.3361,0,0],"fabrisek-gmail-com":[1536,1759077,53665179,379154,0.0061,14.0711,10.733,7.5831,767,229.5017,18849,0.2154],"contact":[7330,11175817,292774016,2118343,0.0286,88.7221,58.5479,42.2955,3475,1343.3507,7280619,85.5824],"claude-standard1":[1256,2153668,81001668,504803,0.005,17.2293,16.2003,10.0961,628,342.7224,0,0],"claude-standard3":[1020,1195050,36654164,387823,0.0041,9.5604,7.3308,7.7565,509,159.1574,0,0],"claude-standard2":[5573,1920288,40958242,406192,0.0093,15.0503,8.1858,8.0408,643,179.2331,0,0],"claude-premium":[3792,5303822,134141340,1149271,0.0152,42.341,26.8283,22.9854,1872,599.4081,1522266,18.6269],"claude-premium1":[5928,8484335,181836634,1763344,0.0233,67.1725,36.3392,35.2156,2890,809.7122,1293948,14.3559],"unknown":[40,112280,151251,3554,0.0002,0.6273,0.0637,0.0784,16,1.2175,0,0],"claude-premium2":[2482,3150399,99780336,644062,0.0099,25.1698,19.9561,12.8812,1231,430.4651,493498,5.851]}},{"d":"2026-10-10","tot":[30592,70493906,1492985188,8801324,0.1156,562.5828,298.5684,175.924,13727,6804.6939,35888533,376.6632],"model":{"opus":[28331,70352775,1492353792,8793645,0.1133,562.2101,298.4708,175.8729,13691,6426.8125,0,0],"haiku":[2237,94152,286131,5130,0.0022,0.1883,0.0286,0.0257,26,0.4082,0,0],"fable-advisor":[0,0,0,0,0,0,0,0,0,376.6632,35888533,376.6632],"sonnet":[24,46979,345265,2549,0,0.1844,0.0691,0.0255,10,0.81,0,0]},"seat":{"contact":[8167,12509101,299122035,1843209,0.0264,99.8279,59.8121,36.8094,3011,1352.6461,6493859,69.7034],"claude-standard1":[1662,2167336,47308349,392963,0.0066,17.3387,9.4617,7.8593,831,205.7686,0,0],"claude-standard":[974,1922635,55052571,212421,0.0036,15.1287,11.0014,4.2284,446,231.7324,0,0],"claude-standard3":[714,1910336,104918506,259385,0.0029,15.2827,20.9837,5.1877,357,432.5059,0,0],"claude-standard2":[742,4013734,48567754,259077,0.003,32.1099,9.7136,5.1815,371,215.5105,0,0],"claude-premium":[5942,12178106,266298627,1877056,0.0238,97.2916,53.2597,37.5411,2945,1219.7054,6443114,68.2336],"fabrisek-gmail-com":[5045,16913194,197181440,1542014,0.0201,135.0357,39.4291,30.8382,2153,932.3778,4397406,45.4638],"claude-premium1":[3194,10042245,267181055,988764,0.0128,80.1463,53.4362,19.7753,1559,1262.3931,12845851,133.7119],"claude-premium2":[4152,8837219,207354851,1426435,0.0166,70.4215,41.471,28.5032,2054,952.054,5708303,59.5505]}}],"convs":[{"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","usd":19.823,"tok":25803187,"req":261,"seats":{"fabrisek-gmail-com":261},"cold":9,"coldTok":642222,"ctx":57587},{"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","title":"Ok récupére la derniére version de sightprice sur git et ega","agent":"alfred","usd":11.799,"tok":13891416,"req":159,"seats":{"fabrisek-gmail-com":101,"contact":2,"claude-premium1":56},"cold":2,"coldTok":225510,"ctx":99226},{"conv":"022b95a1-dbfc-490c-8023-53bfb44324de","title":"Ok j'ai un bug, avec la minimap et les zaap, ainsi que la ro","agent":"alfred","usd":8.72,"tok":12086381,"req":144,"seats":{"fabrisek-gmail-com":144},"cold":2,"coldTok":103620,"ctx":196340},{"conv":"par-t-c9b89d1c-mv1tac2y","title":"Redesign T42 — Generator motion additions (§2.7 Generator rows)","agent":"dev","usd":6.656,"tok":11724975,"req":85,"seats":{"claude-premium2":85},"cold":0,"coldTok":0,"ctx":159834},{"conv":"par-t-afb167aa-mv1tfvol","title":"Redesign T73 — Docs hero DA (static facet, lift, MCP action buttons look)","agent":"dev","usd":6.632,"tok":11740685,"req":97,"seats":{"fabrisek-gmail-com":97},"cold":0,"coldTok":0,"ctx":130818},{"conv":"par-t-4e6014c2-mv1t245q","title":"Redesign T25 — Post TOC (details <1440, sticky rail ≥1440) + active indicator","agent":"dev","usd":6.259,"tok":10716984,"req":87,"seats":{"contact":87},"cold":1,"coldTok":41519,"ctx":105962},{"conv":"e8afcb97-be74-41d9-b8dd-78a74dd4e9ee","title":"Ok il va falloir faire une bonne maj sur le printer, deja le","agent":"alfred","usd":6.085,"tok":13470027,"req":112,"seats":{"fabrisek-gmail-com":64,"claude-standard1":48},"cold":0,"coldTok":0,"ctx":62325},{"conv":"par-t-7b1c5c75-mv1tfvpb","title":"Redesign T53 — One chip language (pills, tags, sort tabs) + sort-pill morph","agent":"dev","usd":5.786,"tok":10330704,"req":87,"seats":{"claude-premium2":87},"cold":0,"coldTok":0,"ctx":125338},{"conv":"09b2d60e-e6d4-4002-9c4a-3656c2c82813","title":"Ok j'aimerais que tu regarde dans les anciens push car on av","agent":"dev","usd":5.649,"tok":11689746,"req":84,"seats":{"claude-premium1":84},"cold":1,"coldTok":24017,"ctx":216093},{"conv":"par-t-95926f2a-mv1tac3a","title":"Redesign T55 — generation_cta block DA look (static facet, fade + buttons up)","agent":"dev","usd":5.371,"tok":8793156,"req":73,"seats":{"fabrisek-gmail-com":73},"cold":1,"coldTok":23061,"ctx":119394},{"conv":"par-t-00d9e5ac-mv1t246d","title":"Redesign T56 — Asset detail grid per breakpoint + wide container + sticky aside","agent":"dev","usd":5.234,"tok":10433155,"req":92,"seats":{"claude-premium2":92},"cold":0,"coldTok":0,"ctx":61027},{"conv":"par-t-baaf8dd7-mv1tew65","title":"Zaap price: Zaaps.cost() ignores the server's hgq prices (formula 36 k vs 7 k)","agent":"dev","usd":4.917,"tok":10203899,"req":59,"seats":{"contact":59},"cold":1,"coldTok":75181,"ctx":235266},{"conv":"par-t-f41c9cfb-mv1x2hfb","title":"Redesign T68 — Plan cards subgrid alignment (CTA row aligned)","agent":"dev","usd":4.558,"tok":6908092,"req":77,"seats":{"claude-standard2":77},"cold":0,"coldTok":0,"ctx":61108},{"conv":"par-t-8a569e4e-mv1t246j","title":"Redesign T36 — Bento asset-library tile art = 4 real posters (+ hover fan-out)","agent":"dev","usd":4.3,"tok":7749495,"req":57,"seats":{"claude-premium2":57},"cold":1,"coldTok":32556,"ctx":208961},{"conv":"par-t-031a20e8-mv1t246s","title":"lowpoly — restore local JS bundles (npm run build) after stale-chunk wipe","agent":"dev","usd":3.517,"tok":6694756,"req":56,"seats":{"claude-standard1":56},"cold":1,"coldTok":34310,"ctx":179109},{"conv":"par-t-327396f2-mv1vmnp8","title":"Printer : à court de pixels, il faut changer de forme pour relancer","agent":"dev","usd":3.511,"tok":7839720,"req":79,"seats":{"fabrisek-gmail-com":79},"cold":0,"coldTok":0,"ctx":167301},{"conv":"par-r-2a931bca-mv1tac34","title":"Headless QA wave 2: low-poly.com redesign delivered tasks","agent":"testeur","usd":3.326,"tok":7274049,"req":49,"seats":{"claude-premium2":49},"cold":0,"coldTok":0,"ctx":211056},{"conv":"par-t-ac55d271-mv1tac0u","title":"Redesign T75 — Auth shell 2-col ≥1024 (static facet panel | card)","agent":"dev","usd":2.947,"tok":8111210,"req":45,"seats":{"fabrisek-gmail-com":45},"cold":0,"coldTok":0,"ctx":222574},{"conv":"par-t-dacab0b1-mv1tac2b","title":"Redesign T11 — MeshPreview before/after split view","agent":"dev","usd":2.826,"tok":6593579,"req":40,"seats":{"contact":40},"cold":0,"coldTok":0,"ctx":208719},{"conv":"par-r-7b4d01d1-mv1tvz51","title":"SightPrice pricing R3/b — tier ladders of direct comparables + value math","agent":"seo-geo","usd":2.661,"tok":4918814,"req":37,"seats":{"fabrisek-gmail-com":37},"cold":1,"coldTok":79378,"ctx":166216},{"conv":"par-t-0f70081d-mv1t1h1p","title":"Play: on zaap-not-enough-kamas, leave the list and re-plan on foot","agent":"dev","usd":2.541,"tok":3647166,"req":31,"seats":{"claude-standard1":31},"cold":1,"coldTok":49117,"ctx":170661},{"conv":"04c060a3-f0cf-42d2-919a-f70ad78e5dd5","title":"Je ne peu toujours pas rajouter une nouvelle regle auto run ","agent":"alfred","usd":2.448,"tok":2334479,"req":51,"seats":{"claude-standard3":11,"claude-premium":40},"cold":2,"coldTok":66666,"ctx":43206},{"conv":"par-r-87b54d09-mv1tvz4y","title":"SightPrice pricing R3/a — French & European market, direct fetches","agent":"seo-geo","usd":2.19,"tok":3325495,"req":24,"seats":{"fabrisek-gmail-com":24},"cold":1,"coldTok":106038,"ctx":160027},{"conv":"par-t-7636f6e6-mv1tac1g","title":"Redesign T79 — Tool layout inline styles → classes (island, intro, alias line)","agent":"dev","usd":1.865,"tok":4587033,"req":30,"seats":{"contact":30},"cold":0,"coldTok":0,"ctx":182390},{"conv":"par-r-5c5fb2ad-mv1u3i9m","title":"Redesign proposal §12: remaining pages, skin-only","agent":"designer","usd":1.736,"tok":2585526,"req":13,"seats":{"claude-premium1":13},"cold":0,"coldTok":0,"ctx":227024},{"conv":"1eefa99d-1db6-4d45-80aa-718f2a8b229c","title":"Ok alors on va améliorer drastiquement alfred, normalemetn c","agent":"alfred","usd":1.521,"tok":1782038,"req":29,"seats":{"claude-premium2":6,"claude-premium":23},"cold":0,"coldTok":0,"ctx":106791},{"conv":"par-t-7d1e0d1c-mv1t1h1u","title":"Tests: repo coverage for src/kamas.js","agent":"dev","usd":1.459,"tok":2638711,"req":24,"seats":{"claude-standard1":24},"cold":0,"coldTok":0,"ctx":136639},{"conv":"par-r-016ce221-mv1sesma","title":"SightPrice: every place a plan price lives (prep for price change)","agent":"lecteur","usd":1.437,"tok":3020241,"req":23,"seats":{"claude-premium":23},"cold":0,"coldTok":0,"ctx":157629},{"conv":"par-t-cf0864c6-mv1xas7j","title":"Tarifs — un abonné actuel ne doit pas basculer sur le nouveau prix","agent":"dev","usd":1.225,"tok":1681083,"req":27,"seats":{"claude-standard2":27},"cold":0,"coldTok":0,"ctx":84811},{"conv":"f0ba3e94-5091-461d-972a-65504af0d82e","title":"# AutoPilot — Tu dois regarder les conversations et alfred e","agent":"alfred","usd":1.201,"tok":671676,"req":17,"seats":{"claude-premium":13,"claude-standard2":4},"cold":2,"coldTok":59460,"ctx":55257},{"conv":"par-t-3c852833-mv1vmnp5","title":"Printer posé sur un tas : pixels aspirés au lieu d'être repoussés","agent":"dev","usd":1.183,"tok":2103372,"req":38,"seats":{"fabrisek-gmail-com":38},"cold":0,"coldTok":0,"ctx":72948},{"conv":"par-r-fd5e22fb-mv1u3i90","title":"Board: tech-debt task for vite buildStart plugins ignoring --outDir","agent":"pm","usd":0.623,"tok":668297,"req":13,"seats":{"fabrisek-gmail-com":13},"cold":1,"coldTok":22593,"ctx":59714},{"conv":"e57cecd1-90ef-4c15-815b-8122cc26c52b","title":"[E2E] compaction check. Read these files one at a time with ","agent":"alfred","usd":0.613,"tok":543385,"req":13,"seats":{"claude-premium2":13},"cold":1,"coldTok":36532,"ctx":39415},{"conv":"a3e813fa-4fbd-457a-abdf-975ffd3e5f26","title":"Yo ultracode ultrathink","agent":"alfred","usd":0.308,"tok":38166,"req":1,"seats":{"claude-standard1":1},"cold":1,"coldTok":37966,"ctx":38166},{"conv":"par-t-6f233a22-mv1xas7e","title":"Tarifs — passer Pro à 49 € et Max à 99 € dans le site","agent":"dev","usd":0.229,"tok":154329,"req":7,"seats":{"claude-standard3":7},"cold":0,"coldTok":0,"ctx":27974},{"conv":"par-t-98ff5be0-mv1ycfdp","title":"Web viewer: agents (Claude CLI) cannot open or drive the built-in viewer","agent":"lecteur","usd":0.19,"tok":88904,"req":4,"seats":{"claude-standard":4},"cold":0,"coldTok":0,"ctx":31264},{"conv":"par-t-4f02b79d-mv1ycfeb","title":"Bug: internet access from Alfred appears broken","agent":"lecteur","usd":0.186,"tok":95770,"req":4,"seats":{"claude-standard3":4},"cold":0,"coldTok":0,"ctx":30358},{"conv":"74d82698-159d-4360-9aff-d0fe3fa3c2ed","title":"[E2E] cache check","agent":"alfred","usd":0.08,"tok":107790,"req":3,"seats":{"fabrisek-gmail-com":3},"cold":1,"coldTok":35539,"ctx":36139},{"conv":"b627c985-944f-43df-8c7f-1bc466ae93dd","title":"[E2E] compaction check. Read these files one at a time with ","agent":"chat","usd":0.046,"tok":14484,"req":3,"seats":{"claude-premium2":3},"cold":0,"coldTok":0,"ctx":3808},{"conv":"d4241619-a82a-4a04-8447-9fa405cb7f3f","title":"[E2E] token-fix check: call one of your Alfred tools to list","agent":"alfred","usd":0.043,"tok":38196,"req":2,"seats":{"claude-standard":2},"cold":0,"coldTok":0,"ctx":19787}],"convCount":42,"cold":[{"at":1791609986162,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":27832,"usd":0.223,"wasted":0.217,"reason":"new session: history shrank or was replayed"},{"at":1791609948822,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":31246,"usd":0.25,"wasted":0.244,"reason":"new session: history shrank or was replayed"},{"at":1791609930631,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":44957,"usd":0.36,"wasted":0.351,"reason":"new session: history shrank or was replayed"},{"at":1791609809565,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":163354,"usd":1.307,"wasted":1.274,"reason":"cache miss"},{"at":1791609683168,"conv":"par-r-fd5e22fb-mv1u3i90","title":"Board: tech-debt task for vite buildStart plugins ignoring --outDir","agent":"pm","seat":"fabrisek-gmail-com","tok":22593,"usd":0.181,"wasted":0.176,"reason":"new session: system prompt rewritten"},{"at":1791609394592,"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","title":"Ok récupére la derniére version de sightprice sur git et ega","agent":"alfred","seat":"fabrisek-gmail-com","tok":58501,"usd":0.468,"wasted":0.456,"reason":"cache miss"},{"at":1791609195031,"conv":"f0ba3e94-5091-461d-972a-65504af0d82e","title":"# AutoPilot — Tu dois regarder les conversations et alfred e","agent":"alfred","seat":"claude-premium","tok":31405,"usd":0.251,"wasted":0.245,"reason":"cache miss"},{"at":1791609191727,"conv":"f0ba3e94-5091-461d-972a-65504af0d82e","title":"# AutoPilot — Tu dois regarder les conversations et alfred e","agent":"alfred","seat":"claude-premium","tok":28055,"usd":0.224,"wasted":0.219,"reason":"new conversation"},{"at":1791608990724,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":37304,"usd":0.298,"wasted":0.291,"reason":"new session: history shrank or was replayed"},{"at":1791608933015,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":27264,"usd":0.218,"wasted":0.213,"reason":"new session: history shrank or was replayed"},{"at":1791608886905,"conv":"04c060a3-f0cf-42d2-919a-f70ad78e5dd5","title":"Je ne peu toujours pas rajouter une nouvelle regle auto run ","agent":"alfred","seat":"claude-standard3","tok":42088,"usd":0.337,"wasted":0.328,"reason":"cache miss"},{"at":1791608806549,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":160241,"usd":1.282,"wasted":1.25,"reason":"cache miss"},{"at":1791608718511,"conv":"par-t-8a569e4e-mv1t246j","title":"Redesign T36 — Bento asset-library tile art = 4 real posters (+ hover fan-out)","agent":"dev","seat":"claude-premium2","tok":32556,"usd":0.26,"wasted":0.254,"reason":"new session: system prompt rewritten"},{"at":1791608717499,"conv":"par-t-031a20e8-mv1t246s","title":"lowpoly — restore local JS bundles (npm run build) after stale-chunk wipe","agent":"dev","seat":"claude-standard1","tok":34310,"usd":0.274,"wasted":0.268,"reason":"new session: system prompt rewritten"},{"at":1791608704521,"conv":"09b2d60e-e6d4-4002-9c4a-3656c2c82813","title":"Ok j'aimerais que tu regarde dans les anciens push car on av","agent":"dev","seat":"claude-premium1","tok":24017,"usd":0.192,"wasted":0.187,"reason":"new session: system prompt rewritten"},{"at":1791608665793,"conv":"par-t-95926f2a-mv1tac3a","title":"Redesign T55 — generation_cta block DA look (static facet, fade + buttons up)","agent":"dev","seat":"fabrisek-gmail-com","tok":23061,"usd":0.184,"wasted":0.18,"reason":"new session: history shrank or was replayed"},{"at":1791608560197,"conv":"04c060a3-f0cf-42d2-919a-f70ad78e5dd5","title":"Je ne peu toujours pas rajouter une nouvelle regle auto run ","agent":"alfred","seat":"claude-standard3","tok":24578,"usd":0.197,"wasted":0.192,"reason":"new conversation"},{"at":1791608298750,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":44743,"usd":0.358,"wasted":0.349,"reason":"new session: system prompt rewritten"},{"at":1791608285518,"conv":"par-t-4e6014c2-mv1t245q","title":"Redesign T25 — Post TOC (details <1440, sticky rail ≥1440) + active indicator","agent":"dev","seat":"contact","tok":41519,"usd":0.332,"wasted":0.324,"reason":"new session: system prompt rewritten"},{"at":1791607910675,"conv":"par-r-87b54d09-mv1tvz4y","title":"SightPrice pricing R3/a — French & European market, direct fetches","agent":"seo-geo","seat":"fabrisek-gmail-com","tok":106038,"usd":0.848,"wasted":0.827,"reason":"new session: system prompt rewritten"},{"at":1791607903815,"conv":"par-r-7b4d01d1-mv1tvz51","title":"SightPrice pricing R3/b — tier ladders of direct comparables + value math","agent":"seo-geo","seat":"fabrisek-gmail-com","tok":79378,"usd":0.635,"wasted":0.619,"reason":"new session: system prompt rewritten"},{"at":1791607890438,"conv":"par-t-baaf8dd7-mv1tew65","title":"Zaap price: Zaaps.cost() ignores the server's hgq prices (formula 36 k vs 7 k)","agent":"dev","seat":"contact","tok":75181,"usd":0.601,"wasted":0.586,"reason":"new session: system prompt rewritten"},{"at":1791607884104,"conv":"par-t-0f70081d-mv1t1h1p","title":"Play: on zaap-not-enough-kamas, leave the list and re-plan on foot","agent":"dev","seat":"claude-standard1","tok":49117,"usd":0.393,"wasted":0.383,"reason":"new session: system prompt rewritten"},{"at":1791607855865,"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","title":"Ok récupére la derniére version de sightprice sur git et ega","agent":"alfred","seat":"fabrisek-gmail-com","tok":167009,"usd":1.336,"wasted":1.303,"reason":"new session: system prompt rewritten"},{"at":1791607761629,"conv":"022b95a1-dbfc-490c-8023-53bfb44324de","title":"Ok j'ai un bug, avec la minimap et les zaap, ainsi que la ro","agent":"alfred","seat":"fabrisek-gmail-com","tok":46741,"usd":0.374,"wasted":0.365,"reason":"new session: system prompt rewritten"},{"at":1791607748320,"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","seat":"fabrisek-gmail-com","tok":105281,"usd":0.842,"wasted":0.821,"reason":"new session: system prompt rewritten"},{"at":1791607271483,"conv":"a3e813fa-4fbd-457a-abdf-975ffd3e5f26","title":"Yo ultracode ultrathink","agent":"alfred","seat":"claude-standard1","tok":37966,"usd":0.304,"wasted":0.296,"reason":"new conversation"},{"at":1791606355018,"conv":"e57cecd1-90ef-4c15-815b-8122cc26c52b","title":"[E2E] compaction check. Read these files one at a time with ","agent":"alfred","seat":"claude-premium2","tok":36532,"usd":0.292,"wasted":0.285,"reason":"new session: history shrank or was replayed"},{"at":1791605060034,"conv":"022b95a1-dbfc-490c-8023-53bfb44324de","title":"Ok j'ai un bug, avec la minimap et les zaap, ainsi que la ro","agent":"alfred","seat":"fabrisek-gmail-com","tok":56879,"usd":0.455,"wasted":0.444,"reason":"new session: history shrank or was replayed"},{"at":1791604755889,"conv":"74d82698-159d-4360-9aff-d0fe3fa3c2ed","title":"[E2E] cache check","agent":"alfred","seat":"fabrisek-gmail-com","tok":35539,"usd":0.071,"wasted":0.068,"reason":"new conversation"}],"compactions":[{"conv":"par-t-00d9e5ac-mv1t246d","title":"Redesign T56 — Asset detail grid per breakpoint + wide container + sticky aside","agent":"dev","at":1791609988617,"before":223478,"after":31045},{"conv":"par-t-f41c9cfb-mv1x2hfb","title":"Redesign T68 — Plan cards subgrid alignment (CTA row aligned)","agent":"dev","at":1791609988396,"before":203251,"after":31103},{"conv":"06aada7d-090e-485a-b15a-f38eec3bad33","title":"Ok j'aimerais améliorer les differentes pages de low poly av","agent":"alfred","at":1791609910256,"before":207364,"after":63931},{"conv":"par-t-4e6014c2-mv1t245q","title":"Redesign T25 — Post TOC (details <1440, sticky rail ≥1440) + active indicator","agent":"dev","at":1791609726263,"before":219643,"after":32059},{"conv":"par-t-7b1c5c75-mv1tfvpb","title":"Redesign T53 — One chip language (pills, tags, sort tabs) + sort-pill morph","agent":"dev","at":1791608991518,"before":213138,"after":28807},{"conv":"par-t-afb167aa-mv1tfvol","title":"Redesign T73 — Docs hero DA (static facet, lift, MCP action buttons look)","agent":"dev","at":1791608991428,"before":227198,"after":31371},{"conv":"par-t-c9b89d1c-mv1tac2y","title":"Redesign T42 — Generator motion additions (§2.7 Generator rows)","agent":"dev","at":1791608711866,"before":228842,"after":31394},{"conv":"c9db7ce0-7ae8-4b3b-ae4f-ae66794e06c3","title":"Ok récupére la derniére version de sightprice sur git et ega","agent":"alfred","at":1791608705722,"before":201331,"after":37388},{"conv":"par-t-95926f2a-mv1tac3a","title":"Redesign T55 — generation_cta block DA look (static facet, fade + buttons up)","agent":"dev","at":1791608660243,"before":235566,"after":41024},{"conv":"e57cecd1-90ef-4c15-815b-8122cc26c52b","title":"[E2E] compaction check. Read these files one at a time with ","agent":"alfred","at":1791606348987,"before":40707,"after":39851},{"conv":"09b2d60e-e6d4-4002-9c4a-3656c2c82813","title":"Ok j'aimerais que tu regarde dans les anciens push car on av","agent":"dev","at":1791605138281,"before":773278},{"conv":"022b95a1-dbfc-490c-8023-53bfb44324de","title":"Ok j'ai un bug, avec la minimap et les zaap, ainsi que la ro","agent":"alfred","at":1791605052318,"before":220276}],"modesToday":{"resume":118,"continue":1919,"fresh":104},"next":{"id":"claude-standard","label":"claude-standard","left":98,"threads":1},"settings":{"strategy":"headroom"}};
+const RM = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const NOW = D.now, T0 = Date.now();
+const now = () => NOW + (Date.now() - T0);
+const SUB_MONTH = 4 * 25 + 4 * 125 + 200; // 4 Team std + 4 Team premium + Max 20x
+const SUB_DAY = SUB_MONTH / 30.4;
+const FIVE_H = 5 * 3600e3;
+/* ---------- format ---------- */
+function tok(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 1 : 2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k';
+  return String(Math.round(n));
+}
+function usd(n, d) { if (d == null) d = n >= 100 ? 0 : n >= 10 ? 1 : 2; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); }
+function dur(ms) {
+  if (ms <= 0) return 'now';
+  const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  if (d) return d + 'd ' + h + 'h'; if (h) return h + 'h ' + String(m).padStart(2, '0') + 'm'; return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+}
+const hhmm = (t) => { const d = new Date(t); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+const hh = (t) => String(new Date(t).getHours()).padStart(2, '0');
+const dayName = (d) => new Date(d + 'T12:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+// cell: 0..3 tokens (input, write, read, output), 4..7 their $, 8 requests, 9 $ without cache, 10 advisor tokens, 11 advisor $
+const tokT = (c) => (c[0] || 0) + (c[1] || 0) + (c[2] || 0) + (c[3] || 0) + (c[10] || 0);
+const valT = (c) => (c[4] || 0) + (c[5] || 0) + (c[6] || 0) + (c[7] || 0) + (c[11] || 0);
+const addc = (a, b) => { for (let i = 0; i < b.length; i++) a[i] = (a[i] || 0) + b[i]; return a; };
+function countUp(el, to, fmt, ms) {
+  if (RM) { el.textContent = fmt(to); return; }
+  const t0 = performance.now(); ms = ms || 900;
+  (function step(t) { const k = Math.min(1, (t - t0) / ms); el.textContent = fmt(to * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); })(t0);
+}
+function seg(id, cb) {
+  const el = $(id);
+  el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; e.stopPropagation();
+    el.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); cb(b.dataset.v); });
+  return () => el.querySelector('button.on').dataset.v;
+}
+
+/* ---------- series ---------- */
+const TYPES = [
+  { k: 'read', name: 'Cache read', tok: 2, usd: 6, c: 'var(--s1)' },
+  { k: 'write', name: 'Cache write', tok: 1, usd: 5, c: 'var(--s2)' },
+  { k: 'input', name: 'Input', tok: 0, usd: 4, c: 'var(--s3)' },
+  { k: 'output', name: 'Output', tok: 3, usd: 7, c: 'var(--s4)' },
+  { k: 'advisor', name: 'Fable advisor', tok: 10, usd: 11, c: 'var(--s7)' },
+];
+const TEAM = D.seats.filter((s) => s.org === 'team').sort((a, b) => a.priority - b.priority);
+const PERSO = D.seats.filter((s) => s.org !== 'team');
+const SEAT_COLORS = {};
+TEAM.forEach((s, i) => { SEAT_COLORS[s.id] = 'var(--s' + (i + 1) + ')'; });
+PERSO.forEach((s) => { SEAT_COLORS[s.id] = 'var(--s-neutral)'; });
+const short = (id) => { const s = D.seats.find((x) => x.id === id); return s ? (s.org === 'team' ? s.label.replace('claude-', '') : 'fabrisek') : id; };
+const MODELS = { opus: ['Opus 5.5', 'var(--s1)'], 'fable-advisor': ['Fable advisor', 'var(--s7)'], fable: ['Fable 5.1', 'var(--s5)'], sonnet: ['Sonnet 5', 'var(--s3)'], haiku: ['Haiku 4.5', 'var(--s4)'], opus45: ['Opus 4.5', 'var(--s-neutral)'] };
+const REASON = { 'new session: system prompt rewritten': 'system prompt rewritten', 'new session: history shrank or was replayed': 'history replayed', 'cache miss': 'cache miss', 'new conversation': 'new conversation', 'prompt cache expired': 'cache expired' };
+
+/* ---------- period ---------- */
+function periodData(p) {
+  const t = now(), last = D.hourly[D.hourly.length - 1].t;
+  let hours = null, days = null, span;
+  if (p === '5h') { hours = D.hourly.filter((h) => h.t > last - 5 * 3600e3); span = 5 / 24; }
+  else if (p === '24h') { hours = D.hourly.filter((h) => h.t > last - 24 * 3600e3); span = 1; }
+  else if (p === 'today') { hours = D.hourly.filter((h) => h.t >= D.day0); span = (t - D.day0) / 86400e3; }
+  else { days = D.daily.slice(p === '7d' ? -7 : 0); span = Math.min(p === '7d' ? 7 : 1e9, (t - D.firstAt) / 86400e3); }
+  const tot = [], seat = {}, model = {};
+  (hours || days).forEach((r) => {
+    addc(tot, r.tot);
+    Object.entries(r.seat).forEach(([k, c]) => { seat[k] = addc(seat[k] || [], c); });
+    Object.entries(r.model || {}).forEach(([k, c]) => { model[k] = addc(model[k] || [], c); });
+  });
+  return { p, hours, days, rows: hours || days, tot, seat, model, span };
+}
+const getPeriod = seg('#period', () => render(true));
+const getUnit = seg('#unit', () => drawChart(true));
+const getSplit = seg('#split', () => drawChart(true));
+let P = null;
+
+
+/* ---------- main chart with event lane ---------- */
+function seriesFor() {
+  const unit = getUnit(), split = getSplit();
+  if (split === 'seat') {
+    // seats only: tokens recorded before seat tracking stay in the totals, not as a series
+    return TEAM.concat(PERSO).map((s) => ({ name: short(s.id), c: SEAT_COLORS[s.id], v: (r) => (r.seat[s.id] ? (unit === 'usd' ? valT(r.seat[s.id]) : tokT(r.seat[s.id])) : 0) }));
+  }
+  return TYPES.map((t) => ({ name: t.name, c: t.c, v: (r) => r.tot[unit === 'usd' ? t.usd : t.tok] || 0 }));
+}
+function niceStep(raw) { const p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p; }
+function roundTop(x, y, w, h, r) { r = Math.min(r, h, w / 2); return 'M' + x + ' ' + (y + h) + 'V' + (y + r) + 'Q' + x + ' ' + y + ' ' + (x + r) + ' ' + y + 'H' + (x + w - r) + 'Q' + (x + w) + ' ' + y + ' ' + (x + w) + ' ' + (y + r) + 'V' + (y + h) + 'Z'; }
+function seatState(s) {
+  const t = now();
+  const fiveLeft = s.five ? 100 - s.five.pct : null, weekLeft = s.week ? 100 - s.week.pct : null;
+  const left = Math.min(fiveLeft == null ? 100 : fiveLeft, weekLeft == null ? 100 : weekLeft);
+  let status = 'ready', cls = 'ok';
+  if (left <= 0) { status = 'exhausted'; cls = 'err'; }
+  else if (s.exhaustedUntil && s.exhaustedUntil > t) { status = 'throttled'; cls = 'warn'; }
+  else if (s.threads.length) { status = 'in use'; cls = 'info'; }
+  let burn = null, eta = null;
+  if (s.five) { const el = Math.max(0.1, (t - (s.five.resetsAt - FIVE_H)) / 3600e3); burn = s.five.pct / el; eta = burn > 0 ? (100 - s.five.pct) / burn * 3600e3 : Infinity; }
+  return { fiveLeft, weekLeft, left, status, cls, burn, eta };
+}
+
+
+
+/* ================= helpers ================= */
+const lvl = (left) => (left > 40 ? 'var(--ok)' : left > 15 ? 'var(--warn)' : 'var(--err)');
+const stCls = { ok: 'ok', info: 'info-c', warn: 'warn', err: 'err' };
+let uid = 0;
+/** Monotone cubic (Fritsch–Carlson) through points: no overshoot, so a stacked band never crosses its neighbour. */
+function mono(p, move) {
+  const n = p.length; if (!n) return '';
+  let d = (move === false ? 'L' : 'M') + p[0][0].toFixed(1) + ' ' + p[0][1].toFixed(1);
+  if (n === 1) return d;
+  const m = [], t = [];
+  for (let i = 0; i < n - 1; i++) m[i] = (p[i + 1][1] - p[i][1]) / ((p[i + 1][0] - p[i][0]) || 1e-9);
+  t[0] = m[0]; t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (m[i] === 0) { t[i] = 0; t[i + 1] = 0; continue; }
+    const a = t[i] / m[i], b = t[i + 1] / m[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); t[i] = k * a * m[i]; t[i + 1] = k * b * m[i]; }
+  }
+  for (let i = 0; i < n - 1; i++) {
+    const dx = p[i + 1][0] - p[i][0];
+    d += 'C' + (p[i][0] + dx / 3).toFixed(1) + ' ' + (p[i][1] + t[i] * dx / 3).toFixed(1) + ' ' + (p[i + 1][0] - dx / 3).toFixed(1) + ' ' + (p[i + 1][1] - t[i + 1] * dx / 3).toFixed(1) + ' ' + p[i + 1][0].toFixed(1) + ' ' + p[i + 1][1].toFixed(1);
+  }
+  return d;
+}
+/** Mini area sparkline, drawn to the box it is given. */
+function sparkArea(vals, color, w, h) {
+  const n = vals.length; if (!n) return '';
+  const mx = Math.max(1e-9, ...vals), id = 'sa' + (uid++);
+  const pts = vals.map((v, i) => [n === 1 ? w / 2 : i / (n - 1) * w, h - 1 - v / mx * (h - 3)]);
+  const line = mono(pts), last = pts[n - 1];
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none"><defs><linearGradient id="' + id + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + color + '" stop-opacity=".45"/><stop offset="1" stop-color="' + color + '" stop-opacity="0"/></linearGradient></defs>' +
+    '<path d="' + line + 'L' + w + ' ' + h + 'L0 ' + h + 'Z" fill="url(#' + id + ')"/><path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="1.5" vector-effect="non-scaling-stroke"/>' +
+    '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="2" fill="' + color + '"/></svg>';
+}
+function showTip(html, cx, cy) {
+  const tip = $('#tip'); tip.innerHTML = html; tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = cx + 16; if (x + w > innerWidth - 8) x = cx - w - 16;
+  let y = cy - 12; if (y + h > innerHeight - 8) y = innerHeight - h - 8;
+  tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px';
+}
+const hideTip = () => { $('#tip').hidden = true; };
+const visible = (el) => el && el.offsetParent !== null && el.clientWidth > 0;
+function prevData(p) {
+  const last = D.hourly[D.hourly.length - 1].t;
+  let a, b;
+  if (p === 'today') { a = D.day0 - 86400e3; b = last - 86400e3; }
+  else if (p === '5h') { a = last - 9 * 3600e3; b = last - 4 * 3600e3; }
+  else return null;
+  const rows = D.hourly.filter((h) => h.t > a - 1 && h.t <= b);
+  if (!rows.length) return null;
+  return rows.reduce((acc, r) => addc(acc, r.tot), []);
+}
+function deltaHtml(cur, prev, invert) {
+  if (prev == null || !prev) return '<span class="delta flat">—</span>';
+  const d = (cur - prev) / prev, up = d >= 0, good = invert ? !up : up;
+  return '<span class="delta ' + (Math.abs(d) < 0.005 ? 'flat' : good ? 'up' : 'down') + '">' + (up ? '▲' : '▼') + ' ' + Math.abs(d * 100).toFixed(0) + '%</span>';
+}
+function hourRows() {
+  // the period's rows with missing hours filled, so every axis is honest
+  if (!P.hours) return P.rows;
+  const last = D.hourly[D.hourly.length - 1].t, first = P.p === 'today' ? D.day0 : last - 4 * 3600e3;
+  const map = new Map(P.hours.map((h) => [h.t, h])), rows = [];
+  for (let t = Math.ceil(first / 3600e3) * 3600e3; t <= last; t += 3600e3) rows.push(map.get(t) || { t, tot: [], seat: {}, model: {} });
+  return rows;
+}
+function agents() {
+  const ag = {};
+  D.convs.forEach((c) => { const a = ag[c.agent] || (ag[c.agent] = { name: c.agent, usd: 0, tok: 0, n: 0 }); a.usd += c.usd; a.tok += c.tok; a.n++; });
+  return Object.values(ag).sort((a, b) => b.usd - a.usd);
+}
+const AGENT_COLORS = {};
+agents().forEach((a, i) => { AGENT_COLORS[a.name] = 'var(--s' + ((i % 8) + 1) + ')'; });
+
+/* ================= seats: table ================= */
+function seatRing(s, st) {
+  const R1 = 37, C1 = 2 * Math.PI * R1, f1 = C1 * Math.max(0, st.fiveLeft) / 100;
+  const R2 = 47, C2 = 2 * Math.PI * R2, f2 = s.week ? C2 * Math.max(0, st.weekLeft) / 100 : 0;
+  return '<svg class="rg" viewBox="0 0 100 100">' +
+    '<circle cx="50" cy="50" r="' + R2 + '" fill="none" stroke="var(--panel-3)" stroke-width="3"' + (s.week ? '' : ' stroke-dasharray="1.5 3.5"') + '/>' +
+    (s.week ? '<circle class="arc" cx="50" cy="50" r="' + R2 + '" fill="none" stroke="' + lvl(st.weekLeft) + '" stroke-width="3" stroke-linecap="round" stroke-dasharray="' + (RM ? f2 : 0) + ' ' + C2 + '" data-to="' + f2 + '" data-c="' + C2 + '" transform="rotate(-90 50 50)" style="transition:stroke-dasharray 1s var(--ease)"/>' : '') +
+    '<circle cx="50" cy="50" r="' + R1 + '" fill="none" stroke="var(--panel-3)" stroke-width="8"/>' +
+    '<circle class="arc" cx="50" cy="50" r="' + R1 + '" fill="none" stroke="' + lvl(st.fiveLeft) + '" stroke-width="8" stroke-linecap="round" stroke-dasharray="' + (RM ? f1 : 0) + ' ' + C1 + '" data-to="' + f1 + '" data-c="' + C1 + '" transform="rotate(-90 50 50)" style="transition:stroke-dasharray 1s var(--ease)"/>' +
+    '<text x="50" y="52" text-anchor="middle" font-size="21" font-weight="650" fill="var(--text)" style="font-variant-numeric:tabular-nums">' + st.fiveLeft + '%</text>' +
+    '<text x="50" y="67" text-anchor="middle" font-size="10" fill="var(--dim)" data-reset="' + s.five.resetsAt + '">' + dur(s.five.resetsAt - now()).replace(/ \d+s$/, '') + '</text></svg>';
+}
+function seatBubble(s) {
+  const st = seatState(s), isNext = s.id === D.next.id, cold = D.cold.filter((e) => e.seat === s.id).length;
+  const pastReset = s.five && st.eta > s.five.resetsAt - now();
+  const shown = s.threads.slice(0, 5);
+  const ags = [...new Set(s.threads.map((t) => t.agent))];
+  const thr = s.threads.length ? '<b>' + s.threads.length + '</b> thread' + (s.threads.length > 1 ? 's' : '') + ' · ' + esc(ags.slice(0, 2).join(', ')) + (ags.length > 2 ? ' +' + (ags.length - 2) : '') : '<span class="dimv">no thread</span>';
+  return '<div class="bub' + (isNext ? ' next' : '') + (s.org === 'team' ? '' : ' perso') + '" data-seat="' + s.id + '">' +
+    '<div class="bh2"><i class="sw" style="background:' + SEAT_COLORS[s.id] + '"></i><span class="nm">' + esc(short(s.id)) + '</span><span class="plan ' + s.plan + '">' + s.plan + '</span>' +
+      '<span class="adv' + (s.advisor ? '' : ' off') + '">ADV</span>' + (isNext ? '<span class="nx">NEXT</span>' : s.org === 'team' ? '' : '<span class="nx" style="color:var(--dim)">LAST RESORT</span>') +
+      '<span class="c-st ' + stCls[st.cls] + '"><span class="d"></span>' + st.status + '</span></div>' +
+    '<div class="bmid">' + seatRing(s, st) + '<div class="binfo">' +
+      '<span class="bval">' + usd(s.todayUsd, 0) + '<small>today</small></span>' +
+      '<span class="bline">' + thr + '</span>' +
+      '<span class="bline burn"><b>' + (st.burn == null ? '—' : st.burn.toFixed(1)) + '</b>%/h · ' + (pastReset ? 'lasts past reset' : '<span class="' + (st.eta < 3600e3 ? 'err' : 'warn') + '">empty in ' + dur(st.eta).replace(/ \d+s$/, '') + '</span>') + '</span>' +
+      '<span class="bline">week <b>' + (s.week ? st.weekLeft + '%' : '—') + '</b>' + '</span>' +
+    '</div></div>' +
+    '<div class="bsp">' + sparkArea(s.spark, SEAT_COLORS[s.id], 200, 26) + '</div></div>';
+}
+function renderSeatRows() {
+  const box = $('#seatRows');
+  box.innerHTML = TEAM.map(seatBubble).join('') + PERSO.map(seatBubble).join('');
+  requestAnimationFrame(() => requestAnimationFrame(() => box.querySelectorAll('.arc').forEach((a) => a.setAttribute('stroke-dasharray', a.dataset.to + ' ' + a.dataset.c))));
+}
+/* aggregate KPI band across every account */
+function renderSeatKpis() {
+  const states = D.seats.map(seatState);
+  const capLeft = states.reduce((a, s) => a + (s.fiveLeft || 0), 0) / 100;
+  const weekSeats = D.seats.filter((s) => s.week), weekLeft = weekSeats.length ? weekSeats.reduce((a, s) => a + (100 - s.week.pct), 0) / weekSeats.length : null;
+  const threads = D.seats.reduce((a, s) => a + s.threads.length, 0);
+  const agentsOn = new Set(); D.seats.forEach((s) => s.threads.forEach((t) => agentsOn.add(t.agent)));
+  const n = D.seats.find((s) => s.id === D.next.id), ns = seatState(n);
+  const today = D.daily[D.daily.length - 1].tot;
+  const nextReset = D.seats.filter((s) => s.five).sort((a, b) => a.five.resetsAt - b.five.resetsAt)[0];
+  const avail = states.filter((s) => s.status !== 'exhausted').length;
+  const capBar = '<svg viewBox="0 0 90 8" preserveAspectRatio="none" style="height:8px">' + states.map((s, i) => '<rect x="' + (i * 10) + '" y="0" width="8.5" height="8" rx="1.5" fill="var(--panel-3)"/><rect x="' + (i * 10) + '" y="' + (8 - s.fiveLeft / 100 * 8) + '" width="8.5" height="' + (s.fiveLeft / 100 * 8) + '" rx="1.5" fill="' + lvl(s.fiveLeft) + '"/>').join('') + '</svg>';
+  $('#kSeat').innerHTML =
+    '<div class="kp" data-open="seats"><span class="l">5h capacity left</span><div class="vrow"><span class="v" id="ks1"></span><div class="ks" style="height:10px">' + capBar + '</div></div><span class="s">of 9 seats · <b>' + avail + '</b> available</span></div>' +
+    '<div class="kp" data-open="seats"><span class="l">Week left</span><span class="v">' + (weekLeft == null ? '—' : Math.round(weekLeft) + '%') + '</span><span class="s">' + weekSeats.length + ' of 9 seats report it</span></div>' +
+    '<div class="kp" data-open="threads"><span class="l">Threads</span><span class="v" id="ks2"></span><span class="s">' + agentsOn.size + ' agents · ' + D.seats.filter((s) => s.threads.length).length + ' seats</span></div>' +
+    '<div class="kp" data-open="cost"><span class="l">API value today</span><span class="v" id="ks5"></span><span class="s"><b>×' + Math.round(valT(today) / (SUB_DAY * (now() - D.day0) / 86400e3)) + '</b> the subscription</span></div>' +
+    '<div class="kp" data-open="tokens+records"><span class="l">Tokens today</span><span class="v" id="ks6"></span><span class="s">' + (today[8] || 0).toLocaleString('en-US') + ' requests</span></div>' +
+    '<div class="kp" data-seat="' + n.id + '"><span class="l">Next seat</span><span class="v">' + esc(short(n.id)) + '</span><span class="s"><b>' + Math.round(ns.left) + '%</b> left · most headroom</span></div>' +
+    '<div class="kp" data-seat="' + nextReset.id + '"><span class="l">Next reset</span><span class="v" data-reset="' + nextReset.five.resetsAt + '">' + dur(nextReset.five.resetsAt - now()) + '</span><span class="s">' + esc(short(nextReset.id)) + ' · ' + seatState(nextReset).fiveLeft + '% left</span></div>';
+  countUp($('#ks1'), capLeft, (v) => v.toFixed(1));
+  countUp($('#ks2'), threads, (v) => String(Math.round(v)));
+  countUp($('#ks5'), valT(today), (v) => usd(v, 0));
+  countUp($('#ks6'), tokT(today), tok);
+  $('#liveThreads').textContent = threads + ' threads running';
+}
+$('#seatRows').addEventListener('mousemove', (e) => {
+  const r = e.target.closest('.bub'); if (!r) return hideTip();
+  const s = D.seats.find((x) => x.id === r.dataset.seat), st = seatState(s);
+  showTip('<div class="th">' + esc(s.label) + '<span>' + s.plan + ' · ' + st.status + '</span></div>' +
+    '<div class="kv"><span>5h</span><b>' + st.fiveLeft + '% left · resets ' + dur(s.five.resetsAt - now()) + '</b><span>Week</span><b>' + (s.week ? st.weekLeft + '% left' : 'not reported') + '</b>' +
+    (s.fableWeek ? '<span>Fable week</span><b>' + (100 - s.fableWeek.pct) + '% left</b>' : '') +
+    '<span>Today</span><b>' + tok(s.todayTok) + ' · ' + usd(s.todayUsd, 0) + '</b><span>Hit 100% today</span><b>' + (s.hitsToday ? '×' + s.hitsToday : 'no') + '</b></div>' +
+    (s.threads.length ? '<div class="tf" style="display:block">' + s.threads.map((t) => '<div class="ev"><span class="tm">' + tok(t.ctx) + '</span><span class="tt"><span class="ag">' + esc(t.agent) + '</span> ' + esc(t.title) + '</span><span></span></div>').join('') + '</div>' : ''), e.clientX, e.clientY);
+});
+$('#seatRows').addEventListener('mouseleave', hideTip);
+
+/* ================= seats: 5h quota over time (approximated) ================= */
+let quotaState = null;
+function drawQuota(anim) {
+  const wrap = $('#quotaWrap'); if (!visible(wrap)) return;
+  const svg = $('#quotaSvg'), W = wrap.clientWidth, H = wrap.clientHeight;
+  const padL = 34, padR = 10, padT = 8, padB = 18;
+  const last = now(), first = last - 12 * 3600e3;
+  const xs = (t) => padL + (t - first) / (last - first) * (W - padL - padR), ys = (v) => padT + (H - padT - padB) * (1 - v / 100);
+  const steps = 96, times = Array.from({ length: steps + 1 }, (_, i) => first + i * (last - first) / steps);
+  const hourVal = (seat, t0, t1) => { // seat $ between t0 and t1, hours prorated
+    let v = 0;
+    D.hourly.forEach((h) => { const a = Math.max(h.t, t0), b = Math.min(h.t + 3600e3, t1); if (b > a && h.seat[seat]) v += valT(h.seat[seat]) * (b - a) / 3600e3; });
+    return v;
+  };
+  const lines = D.seats.map((s) => {
+    const R = s.five.resetsAt, curStart = R - FIVE_H, curVal = hourVal(s.id, curStart, last);
+    const k = curVal > 0 ? s.five.pct / curVal : 0;
+    const pts = times.map((t) => { let ws = curStart; while (ws > t) ws -= FIVE_H; return [t, Math.min(100, hourVal(s.id, ws, t) * k)]; });
+    return { s, pts };
+  });
+  const wAll = lines.reduce((a, l) => a + planW(l.s), 0), pool = times.map((t, j) => lines.reduce((a, l) => a + l.pts[j][1] * planW(l.s), 0) / wAll);
+  const TH = 80;
+  let o = '<defs><linearGradient id="qg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--s1)" stop-opacity=".55"/><stop offset="1" stop-color="var(--s1)" stop-opacity=".06"/></linearGradient></defs><g class="grid">';
+  [0, 50, 100].forEach((v) => { o += '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + ys(v) + '" y2="' + ys(v) + '"' + (v ? ' stroke-dasharray="2 4"' : '') + '/>'; });
+  o += '</g><line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + ys(TH) + '" y2="' + ys(TH) + '" stroke="var(--warn)" stroke-dasharray="5 4" stroke-opacity=".7"/>';
+  o += '<g class="axis">';
+  [0, 50, 100].forEach((v) => { o += '<text x="' + (padL - 6) + '" y="' + (ys(v) + 3.5) + '" text-anchor="end">' + v + '%</text>'; });
+  o += '<text x="' + (W - padR) + '" y="' + (ys(TH) - 4) + '" text-anchor="end" style="fill:var(--warn)">' + TH + '%</text>';
+  for (let t = Math.ceil(first / 7200e3) * 7200e3; t < last; t += 7200e3) o += '<text x="' + xs(t) + '" y="' + (H - 4) + '" text-anchor="middle">' + hh(t) + 'h</text>';
+  o += '</g>';
+  // every seat reset in range: a short tick on the floor, in the seat colour
+  const resets = [];
+  D.seats.forEach((st) => { for (let r = st.five.resetsAt; r > first; r -= FIVE_H) if (r <= last) resets.push({ t: r, s: st }); });
+  resets.forEach((r) => { o += '<line x1="' + xs(r.t) + '" x2="' + xs(r.t) + '" y1="' + (ys(0) - 7) + '" y2="' + ys(0) + '" stroke="' + SEAT_COLORS[r.s.id] + '" stroke-width="2" stroke-linecap="round"/>'; });
+  const pts = pool.map((v, j) => [xs(times[j]), ys(v)]);
+  o += '<g class="' + (anim ? 'reveal' : '') + '"><path d="' + mono(pts) + 'L' + pts[pts.length - 1][0] + ' ' + ys(0) + 'L' + pts[0][0] + ' ' + ys(0) + 'Z" fill="url(#qg)"/>' +
+    '<path d="' + mono(pts) + '" fill="none" stroke="var(--s1)" stroke-width="2"/>' +
+    '<circle cx="' + pts[pts.length - 1][0] + '" cy="' + pts[pts.length - 1][1] + '" r="3.5" fill="var(--s1)" stroke="var(--elev)" stroke-width="2"/></g>';
+  o += '<line id="qx" y1="' + padT + '" y2="' + (H - padB) + '" stroke="var(--muted)" stroke-dasharray="2 3" visibility="hidden"/>';
+  o += '<rect id="qhit" x="' + padL + '" y="' + padT + '" width="' + (W - padL - padR) + '" height="' + (H - padT - padB) + '" fill="transparent"/>';
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); svg.innerHTML = o;
+  const nowUsed = pool[pool.length - 1];
+  $('#quotaFig').innerHTML = '<b>' + Math.round(nowUsed) + '%</b> used now · plan-weighted (STD 1 · PRM 5 · MAX 20) · approximated';
+  $('#quotaLegend').innerHTML = '<span><i class="sw" style="background:var(--s1)"></i>pool used</span><span><i class="ln" style="border-color:var(--warn)"></i>threshold</span><span><i style="display:inline-block;width:2px;height:8px;background:var(--muted)"></i>seat reset</span>';
+  quotaState = { lines, pool, xs, times, padL, W, padR };
+}
+$('#quotaSvg').addEventListener('mousemove', (e) => {
+  const st = quotaState; if (!st) return;
+  const box = e.currentTarget.getBoundingClientRect(), mx = e.clientX - box.left;
+  let i = 0, best = 1e9; st.times.forEach((t, j) => { const d = Math.abs(st.xs(t) - mx); if (d < best) { best = d; i = j; } });
+  const x = st.xs(st.times[i]), q = $('#qx'); q.setAttribute('x1', x); q.setAttribute('x2', x); q.setAttribute('visibility', 'visible');
+  const rows = st.lines.map((l) => ({ l, v: l.pts[i][1] })).sort((a, b) => b.v - a.v);
+  showTip('<div class="th">' + hhmm(st.times[i]) + '<span>pool ' + Math.round(st.pool[i]) + '% used · weighted</span></div>' + rows.map((r) => '<div class="trr"><i class="sw" style="background:' + SEAT_COLORS[r.l.s.id] + '"></i><span>' + esc(short(r.l.s.id)) + ' <span class="dim">×' + planW(r.l.s) + '</span></span><span>' + Math.round(r.v) + '%</span><span class="p">' + Math.round(100 - r.v) + '% left</span></div>').join(''), e.clientX, e.clientY);
+});
+$('#quotaSvg').addEventListener('mouseleave', () => { hideTip(); const q = $('#qx'); if (q) q.setAttribute('visibility', 'hidden'); });
+
+/* ================= plan-weighted usage ================= */
+const PLAN_W = { STD: 1, PRM: 5, MAX: 20 }; // declared: Team standard ≈ 1×, Team premium ≈ 5×, Max 20x ≈ 20× (no multiplier in the plugin)
+const planW = (s) => PLAN_W[s.plan] || 1;
+function weighted(key) {
+  const rows = D.seats.map((s) => ({ s, w: planW(s), pct: key === 'five' ? (s.five ? s.five.pct : null) : (s.week ? s.week.pct : null) }));
+  const rep = rows.filter((r) => r.pct != null), wsum = rep.reduce((a, r) => a + r.w, 0);
+  return { rows, pct: wsum ? rep.reduce((a, r) => a + r.pct * r.w, 0) / wsum : null, wRep: wsum, wAll: rows.reduce((a, r) => a + r.w, 0), n: rep.length };
+}
+function weightTip(key, title) {
+  const g = weighted(key);
+  return '<div class="th">' + title + '<span>' + (g.pct == null ? '—' : Math.round(g.pct) + '% used') + '</span></div>' +
+    g.rows.slice().sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1)).map((r) => '<div class="trr"><i class="sw" style="background:' + SEAT_COLORS[r.s.id] + '"></i><span>' + esc(short(r.s.id)) + ' <span class="dim">' + r.s.plan + ' ×' + r.w + '</span></span><span>' + (r.pct == null ? '<span class="dim">not reported</span>' : r.pct + '%') + '</span><span class="p">' + Math.round(r.w / g.wAll * 100) + '%</span></div>').join('') +
+    '<div class="tf"><span>weights STD 1 · PRM 5 · MAX 20 (declared)</span></div>' + (g.n < g.rows.length ? '<div class="tf"><span>' + g.n + ' of ' + g.rows.length + ' seats report it · ' + Math.round(g.wRep / g.wAll * 100) + '% of capacity</span></div>' : '');
+}
+let tokSplit = 'type';
+function tokTip() {
+  const T = P.tot, tot = tokT(T);
+  let rows;
+  if (tokSplit === 'type') rows = TYPES.map((t) => ({ n: t.name, c: t.c, v: T[t.tok] || 0 }));
+  else if (tokSplit === 'model') rows = Object.entries(P.model).map(([k, c]) => ({ n: (MODELS[k] || [k])[0], c: (MODELS[k] || [0, 'var(--s-neutral)'])[1], v: tokT(c) }));
+  else rows = Object.entries(P.seat).map(([k, c]) => ({ n: k === 'unknown' ? 'before seat tracking' : short(k), c: SEAT_COLORS[k] || 'var(--panel-3)', v: tokT(c) }));
+  rows = rows.filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
+  return '<div class="th">Tokens by ' + tokSplit + '<span>' + tok(tot) + '</span></div>' + rows.map((r) => '<div class="trr"><i class="sw" style="background:' + r.c + '"></i><span>' + esc(r.n) + '</span><span>' + tok(r.v) + '</span><span class="p">' + (r.v / tot * 100).toFixed(r.v / tot < .01 ? 1 : 0) + '%</span></div>').join('');
+}
+$('#kUse').addEventListener('mousemove', (e) => {
+  const k = e.target.closest('[data-tip]'); if (!k || e.target.closest('.seg')) return hideTip();
+  const t = k.dataset.tip;
+  showTip(t === 'tok' ? tokTip() : t === 'five' ? weightTip('five', '5h usage, plan-weighted') : weightTip('week', 'Week usage, plan-weighted'), e.clientX, e.clientY);
+});
+$('#kUse').addEventListener('mouseleave', hideTip);
+$('#kUse').addEventListener('click', (e) => {
+  const b = e.target.closest('.seg button'); if (!b) return;
+  e.stopPropagation(); tokSplit = b.dataset.v; b.parentNode.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); renderTokSub();
+});
+function renderTokSub() {
+  const el = $('#tokSub'); if (!el) return;
+  const T = P.tot, tot = tokT(T);
+  let top;
+  if (tokSplit === 'type') top = TYPES.map((t) => [t.name, T[t.tok] || 0]);
+  else if (tokSplit === 'model') top = Object.entries(P.model).map(([k, c]) => [(MODELS[k] || [k])[0], tokT(c)]);
+  else top = Object.entries(P.seat).filter(([k]) => k !== 'unknown').map(([k, c]) => [short(k), tokT(c)]);
+  top.sort((a, b) => b[1] - a[1]);
+  el.innerHTML = top.slice(0, 2).map((x) => esc(x[0]) + ' <b>' + Math.round(x[1] / tot * 100) + '%</b>').join(' · ');
+}
+
+/* ================= usage: KPI strip ================= */
+let liveTimer = null;
+function renderUseKpis() {
+  const T = P.tot, value = valT(T), nocache = T[9] || 0, saved = nocache - value, tokens = tokT(T);
+  const hit = T[2] / Math.max(1, T[0] + T[1] + T[2]);
+  const pv = prevData(P.p), rows = hourRows();
+  const pHit = pv ? pv[2] / Math.max(1, pv[0] + pv[1] + pv[2]) : null;
+  const ser = (f) => rows.map((r) => (r.tot.length ? f(r.tot) : 0));
+  const k = (id, label, open, sub, delta, spark, color) => '<div class="kp" data-open="' + open + '"><span class="l">' + label + '</span><div class="vrow"><span class="v" id="' + id + '"></span><div class="ks">' + sparkArea(spark, color, 120, 26) + '</div></div><span class="s">' + delta + ' ' + sub + '</span></div>';
+  const perDay = valT(periodData('24h').tot);
+  const proj = P.p === 'today' ? '→ <b>' + usd(value / ((now() - D.day0) / 86400e3), 0) + '</b> by midnight' : '<b>' + usd(value / Math.max(1, P.span), 0) + '</b>/day';
+  const secs = Math.max(60, P.span * 86400), avgS = tokens / secs;
+  const peakS = Math.max(...rows.map((r) => (r.tot.length ? tokT(r.tot) : 0))) / (P.hours ? 3600 : 86400);
+  const g5 = weighted('five'), gw = weighted('week');
+  const bars = (key) => '<svg viewBox="0 0 90 10" preserveAspectRatio="none" style="height:10px">' + D.seats.map((st, i) => { const p = key === 'five' ? st.five.pct : st.week ? st.week.pct : null; const left = p == null ? 0 : 100 - p;
+    return '<rect x="' + (i * 10) + '" y="0" width="8.5" height="10" rx="1.5" fill="var(--panel-3)"' + (p == null ? ' opacity=".4"' : '') + '/>' + (p == null ? '' : '<rect x="' + (i * 10) + '" y="' + (10 - left / 10) + '" width="8.5" height="' + (left / 10) + '" rx="1.5" fill="' + lvl(left) + '"/>'); }).join('') + '</svg>';
+  $('#kUse').innerHTML =
+    k('ku1', 'API value', 'cost', proj + ' · ' + (T[8] || 0).toLocaleString('en-US') + ' req', deltaHtml(value, pv && valT(pv)), ser(valT), 'var(--s4)') +
+    '<div class="kp" data-open="tokens+records"><span class="l"><span class="pulse" style="display:inline-block;vertical-align:middle;margin-right:5px"></span>Tokens / second</span><div class="vrow"><span class="v" id="tps"></span><div class="ks" id="tpsSpark"></div></div><span class="s">avg <b>' + tok(avgS) + '</b>/s · peak <b>' + tok(peakS) + '</b>/s</span></div>' +
+    '<div class="kp" data-open="tokens+records" data-tip="tok"><span class="l" style="display:flex;align-items:center;gap:8px">Tokens <span class="seg xs" style="text-transform:none;letter-spacing:0"><button data-v="type"' + (tokSplit === 'type' ? ' class="on"' : '') + '>Type</button><button data-v="model"' + (tokSplit === 'model' ? ' class="on"' : '') + '>Model</button><button data-v="seat"' + (tokSplit === 'seat' ? ' class="on"' : '') + '>Seat</button></span></span><div class="vrow"><span class="v" id="ku4"></span><div class="ks">' + sparkArea(ser(tokT), 'var(--s7)', 120, 26) + '</div></div><span class="s" id="tokSub"></span></div>' +
+    '<div class="kp" data-open="seats" data-tip="five"><span class="l">5h used · plan-weighted</span><div class="vrow"><span class="v" id="ku5"></span><div class="ks" style="height:10px;align-self:center">' + bars('five') + '</div></div><span class="s"><b>' + (100 - g5.pct).toFixed(0) + '%</b> of weighted capacity left</span></div>' +
+    '<div class="kp" data-open="seats" data-tip="week"><span class="l">Week used · plan-weighted</span><div class="vrow"><span class="v" id="ku6"></span><div class="ks" style="height:10px;align-self:center">' + bars('week') + '</div></div><span class="s">' + gw.n + ' of 9 seats report it</span></div>';
+  countUp($('#ku1'), value, (v) => usd(v, 0));
+  const el = $('#ku4'); countUp(el, tokens, tok);
+  countUp($('#ku5'), g5.pct, (v) => Math.round(v) + '%');
+  if (gw.pct == null) $('#ku6').textContent = '—'; else countUp($('#ku6'), gw.pct, (v) => Math.round(v) + '%');
+  renderTokSub();
+  clearInterval(liveTimer);
+  if (!RM && P.hours && D.seats.some((s) => s.threads.some((t) => t.busy))) {
+    const rate = tokT(D.hourly[D.hourly.length - 2].tot) / 3600, t0 = Date.now();
+    setTimeout(() => { liveTimer = setInterval(() => { el.textContent = tok(tokens + rate * (Date.now() - t0) / 1000); }, 250); }, 1000);
+  }
+}
+
+/* ================= usage: main time chart ================= */
+let showEvents = false;
+$('#evSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; e.stopPropagation(); showEvents = !showEvents; b.classList.toggle('on', showEvents); drawChart(false); });
+let chartState = null;
+function drawChart(anim) {
+  const wrap = $('#chartWrap'); if (!visible(wrap)) return;
+  const unit = getUnit(), fmt = unit === 'usd' ? (v) => usd(v) : tok, series = seriesFor();
+  const svg = $('#chart'), W = wrap.clientWidth, H = wrap.clientHeight;
+  const rows = hourRows(), n = rows.length, hourly = !!P.hours;
+  const padL = 44, padR = 46, padT = 22, padB = 20;
+  const totals = rows.map((r) => series.reduce((a, s) => a + s.v(r), 0));
+  const max = Math.max(1e-9, ...totals), step = niceStep(max / 4), top = Math.ceil(max / step) * step;
+  const cum = []; rows.reduce((a, r, i) => (cum[i] = a + (r.tot.length ? valT(r.tot) : 0)), 0);
+  const cmax = Math.max(1e-9, cum[n - 1]), cstep = niceStep(cmax / 4), ctop = Math.ceil(cmax / cstep) * cstep;
+  const x = (i) => padL + (n === 1 ? 0.5 : i / (n - 1)) * (W - padL - padR);
+  const y = (v) => padT + (H - padT - padB) * (1 - v / top);
+  const yc = (v) => padT + (H - padT - padB) * (1 - v / ctop);
+  let o = '<defs>' + series.map((s, i) => '<linearGradient id="ag' + i + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + s.c + '" stop-opacity=".75"/><stop offset="1" stop-color="' + s.c + '" stop-opacity=".18"/></linearGradient>').join('') + '</defs>';
+  o += '<g class="grid">'; for (let v = 0; v <= top + 1e-9; v += step) o += '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + y(v) + '" y2="' + y(v) + '"' + (v ? ' stroke-dasharray="2 4"' : '') + '/>'; o += '</g>';
+  o += '<g class="axis">';
+  for (let v = 0; v <= top + 1e-9; v += step) o += '<text x="' + (padL - 8) + '" y="' + (y(v) + 3.5) + '" text-anchor="end">' + (v ? fmt(v) : '0') + '</text>';
+  for (let v = cstep; v <= ctop + 1e-9; v += cstep) o += '<text class="r" x="' + (W - padR + 8) + '" y="' + (yc(v) + 3.5) + '">' + usd(v, 0) + '</text>';
+  const every = Math.ceil(n / Math.max(3, Math.floor((W - padL - padR) / 52)));
+  rows.forEach((r, i) => { if (i % every) return; o += '<text x="' + x(i) + '" y="' + (H - 4) + '" text-anchor="middle">' + (hourly ? hh(r.t) + 'h' : new Date(r.d + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })) + '</text>'; });
+  o += '</g><g class="' + (anim ? 'reveal' : '') + '">';
+  // stacked bands, bottom → top
+  const base = rows.map(() => 0);
+  series.forEach((s, si) => {
+    const lo = base.slice(), hi = rows.map((r, i) => (base[i] += s.v(r)));
+    if (hi.every((v, i) => v === lo[i])) return;
+    const upper = hi.map((v, i) => [x(i), y(v)]), lower = lo.map((v, i) => [x(i), y(v)]).reverse();
+    o += '<path d="' + mono(upper) + mono(lower, false) + 'Z" fill="url(#ag' + si + ')"/>';
+    o += '<path d="' + mono(upper) + '" fill="none" stroke="' + s.c + '" stroke-width="1.5"/>';
+  });
+  // cumulative API cost, right axis
+  o += '<path d="' + mono(cum.map((v, i) => [x(i), yc(v)])) + '" fill="none" stroke="var(--s4)" stroke-width="1.6" stroke-dasharray="5 4" opacity=".9"/>';
+  o += '<circle cx="' + x(n - 1) + '" cy="' + yc(cum[n - 1]) + '" r="3" fill="var(--s4)"/>';
+  o += '</g>';
+  const pk = totals.indexOf(Math.max(...totals));
+  if (totals[pk] > 0 && n > 1) {
+    const px = x(pk), py = y(totals[pk]), anc = pk > n * 0.8 ? 'end' : pk < n * 0.15 ? 'start' : 'middle';
+    o += '<circle cx="' + px + '" cy="' + py + '" r="3.5" fill="var(--text)" stroke="var(--elev)" stroke-width="2"/><text class="peak-l" x="' + px + '" y="' + (py - 9) + '" text-anchor="' + anc + '">' + fmt(totals[pk]) + ' <tspan class="peak-s">peak' + (hourly ? ' · ' + hh(rows[pk].t) + 'h' : '') + '</tspan></text>';
+  }
+  // events sit on the total curve at their minute
+  const events = [];
+  if (hourly && showEvents) {
+    const tx = (t) => { const f = (t - rows[0].t - 1800e3) / 3600e3; return { f, px: padL + f / Math.max(1, n - 1) * (W - padL - padR) }; };
+    const yAt = (f) => { const i = Math.max(0, Math.min(n - 1, Math.floor(f))), j = Math.min(n - 1, i + 1), k = Math.max(0, Math.min(1, f - i)); return y(totals[i] * (1 - k) + totals[j] * k); };
+    D.cold.filter((e) => e.at >= rows[0].t).forEach((e) => { const p = tx(e.at); events.push({ kind: 'cold', at: e.at, x: Math.min(W - padR, Math.max(padL, p.px)), y: yAt(p.f), e }); });
+    D.compactions.filter((e) => e.at >= rows[0].t).forEach((e) => { const p = tx(e.at); events.push({ kind: 'comp', at: e.at, x: Math.min(W - padR, Math.max(padL, p.px)), y: yAt(p.f), e }); });
+    events.forEach((ev, i) => {
+      const yy = ev.y - 9, sz = ev.kind === 'cold' ? 3 + Math.min(3, Math.sqrt(ev.e.tok / 30000)) : 3.8;
+      o += ev.kind === 'cold'
+        ? '<path class="mark" data-e="' + i + '" d="M' + ev.x + ' ' + (yy + sz) + 'L' + (ev.x + sz) + ' ' + (yy - sz * .8) + 'L' + (ev.x - sz) + ' ' + (yy - sz * .8) + 'Z" fill="var(--s2)" stroke="var(--elev)" stroke-width="1"/>'
+        : '<path class="mark" data-e="' + i + '" d="M' + ev.x + ' ' + (yy - sz) + 'L' + (ev.x + sz) + ' ' + yy + 'L' + ev.x + ' ' + (yy + sz) + 'L' + (ev.x - sz) + ' ' + yy + 'Z" fill="var(--s7)" stroke="var(--elev)" stroke-width="1"/>';
+    });
+  }
+  o += '<g class="xh" id="xh" visibility="hidden"><line y1="' + padT + '" y2="' + (H - padB) + '"/></g>';
+  o += '<rect id="chit" x="' + padL + '" y="' + padT + '" width="' + (W - padL - padR) + '" height="' + (H - padT - padB) + '" fill="transparent"/>';
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); svg.innerHTML = o;
+  const nCold = events.filter((e) => e.kind === 'cold').length;
+  $('#chartLegend').innerHTML = series.map((s) => '<span><i class="sw" style="background:' + s.c + '"></i>' + esc(s.name) + '</span>').join('') +
+    '<span><i class="ln"></i>API cost, cumulative (right)</span>' +
+    (events.length ? '<span><span style="color:var(--s2);font-size:10px">▼</span>' + nCold + ' cold cache</span><span><span style="color:var(--s7);font-size:10px">◆</span>' + (events.length - nCold) + ' compactions</span>' : '');
+  $('#mainTitle').textContent = hourly ? 'Throughput · hourly' : 'Throughput · daily';
+  $('#mainFig').innerHTML = '<b>' + fmt(totals.reduce((a, b) => a + b, 0)) + '</b>';
+  chartState = { rows, series, totals, cum, fmt, x, y, events, unit, n, padT, H, padB };
+}
+$('#chart').addEventListener('mousemove', (e) => {
+  const st = chartState; if (!st) return;
+  const svg = e.currentTarget, box = svg.getBoundingClientRect(), mx = e.clientX - box.left, my = e.clientY - box.top;
+  svg.querySelectorAll('.mark.hot').forEach((m) => m.classList.remove('hot'));
+  const near = st.events.filter((ev) => Math.abs(ev.x - mx) < 7 && Math.abs(ev.y - 9 - my) < 12).sort((a, b) => b.at - a.at);
+  const xh = $('#xh');
+  if (near.length) {
+    xh.setAttribute('visibility', 'hidden');
+    near.forEach((ev) => { const m = svg.querySelector('.mark[data-e="' + st.events.indexOf(ev) + '"]'); if (m) m.classList.add('hot'); });
+    return showTip('<div class="th">' + near.length + ' event' + (near.length > 1 ? 's' : '') + '<span>' + hhmm(near[near.length - 1].at) + '–' + hhmm(near[0].at) + '</span></div>' + near.slice(0, 5).map((ev) => ev.kind === 'cold'
+      ? '<div class="ev"><span class="tm">' + hhmm(ev.at) + '</span><span class="tt"><span style="color:var(--s2)">▼</span> ' + esc(ev.e.title) + '</span><span>' + tok(ev.e.tok) + '</span><span class="why">' + esc(REASON[ev.e.reason] || ev.e.reason) + ' · ' + esc(short(ev.e.seat)) + ' · +' + usd(ev.e.wasted) + '</span></div>'
+      : '<div class="ev"><span class="tm">' + hhmm(ev.at) + '</span><span class="tt"><span style="color:var(--s7)">◆</span> ' + esc(ev.e.title) + '</span><span>' + tok(ev.e.before) + ' → ' + tok(ev.e.after) + '</span><span class="why">compaction · ' + esc(ev.e.agent) + '</span></div>').join('') + (near.length > 5 ? '<div class="dim">+' + (near.length - 5) + ' more</div>' : ''), e.clientX, e.clientY);
+  }
+  let i = 0, best = 1e9; for (let j = 0; j < st.n; j++) { const d = Math.abs(st.x(j) - mx); if (d < best) { best = d; i = j; } }
+  const r = st.rows[i], px = st.x(i);
+  xh.setAttribute('visibility', 'visible'); xh.querySelector('line').setAttribute('x1', px); xh.querySelector('line').setAttribute('x2', px);
+  xh.querySelectorAll('circle').forEach((c) => c.remove());
+  let acc = 0; st.series.forEach((s) => { const v = s.v(r); if (!v) return; acc += v; const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); c.setAttribute('cx', px); c.setAttribute('cy', st.y(acc)); c.setAttribute('r', 3); c.setAttribute('fill', s.c); c.setAttribute('stroke', 'var(--elev)'); c.setAttribute('stroke-width', 1.5); xh.appendChild(c); });
+  const items = st.series.map((s) => ({ s, v: s.v(r) })).filter((q) => q.v > 0).sort((a, b) => b.v - a.v), tot = st.totals[i] || 0;
+  const val = r.tot.length ? valT(r.tot) : 0, saved = r.tot.length ? r.tot[9] - val : 0;
+  const ev = r.t ? st.events.filter((q) => q.at >= r.t && q.at < r.t + 3600e3) : [], nc = ev.filter((q) => q.kind === 'cold').length;
+  showTip('<div class="th">' + (r.d ? dayName(r.d) : hh(r.t) + ':00–' + hh(r.t + 3600e3) + ':00') + '<span>' + st.fmt(tot) + '</span></div>' +
+    (items.length ? items.slice(0, 9).map((q) => '<div class="trr"><i class="sw" style="background:' + q.s.c + '"></i><span>' + esc(q.s.name) + '</span><span>' + st.fmt(q.v) + '</span><span class="p">' + Math.round(q.v / tot * 100) + '%</span></div>').join('') : '<div class="dim">No traffic</div>') +
+    (val ? '<div class="tf"><span>' + (st.unit === 'usd' ? tok(tokT(r.tot)) + ' tokens' : usd(val) + ' value') + ' · ' + (r.tot[8] || 0) + ' req</span><b>' + usd(saved) + ' saved</b></div>' : '') +
+    '<div class="tf"><span>cumulative</span><span style="color:var(--s4);font-weight:600">' + usd(st.cum[i], 0) + '</span></div>' +
+    (ev.length ? '<div class="tf"><span>' + nc + ' cold · ' + (ev.length - nc) + ' compaction' + (ev.length - nc === 1 ? '' : 's') + '</span></div>' : ''), e.clientX, e.clientY);
+});
+$('#chart').addEventListener('mouseleave', () => { hideTip(); const xh = $('#xh'); if (xh) xh.setAttribute('visibility', 'hidden'); });
+
+/* ================= usage: spend-rate speedometer + live throughput ================= */
+let liveLoop = null;
+function renderMeter() {
+  const el = $('#tps'), box = $('#tpsSpark'); if (!el || !box) return;
+  const src = D.perMin.slice(0, 59).filter((v) => v > 0).map((v) => v / 60);
+  let buf = src.slice(-30), k = 0;
+  const show = () => { el.textContent = tok(buf[buf.length - 1]) + '/s'; box.innerHTML = sparkArea(buf, 'var(--s1)', 120, 26); };
+  show(); clearInterval(liveLoop);
+  if (!RM) liveLoop = setInterval(() => { buf = buf.slice(1).concat(src[(k++ * 7) % src.length]); show(); }, 1500);
+}
+
+/* ================= usage: DPS-style leaderboard ================= */
+let dpsBy = 'seat';
+const dpsNodes = new Map();
+function dpsData() {
+  if (dpsBy === 'seat') return Object.entries(P.seat).filter(([k]) => k !== 'unknown').map(([k, c]) => ({ id: 's:' + k, name: short(k), tag: (D.seats.find((s) => s.id === k) || {}).plan || '', v: valT(c), c: SEAT_COLORS[k] }));
+  if (dpsBy === 'agent') return agents().map((a) => ({ id: 'a:' + a.name, name: a.name, tag: a.n + ' conv', v: a.usd, c: AGENT_COLORS[a.name] }));
+  return D.convs.map((c) => ({ id: 'c:' + c.conv, name: c.title, tag: c.agent, v: c.usd, c: AGENT_COLORS[c.agent] || 'var(--s1)' }));
+}
+function renderDps() {
+  const box = $('#dps'); if (!visible(box)) return;
+  const rowH = 26, cap = Math.max(3, Math.floor((box.clientHeight + 4) / rowH));
+  const list = dpsData().filter((d) => d.v > 0).sort((a, b) => b.v - a.v).slice(0, cap);
+  const max = list.length ? list[0].v : 1, tot = dpsData().reduce((a, d) => a + d.v, 0);
+  const keep = new Set(list.map((d) => d.id));
+  dpsNodes.forEach((el, id) => { if (!keep.has(id)) { el.remove(); dpsNodes.delete(id); } });
+  list.forEach((d, i) => {
+    let el = dpsNodes.get(d.id);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'dr'; el.style.transform = 'translateY(' + (cap * rowH) + 'px)';
+      el.innerHTML = '<div class="bar"><i style="width:0"></i><span></span></div><span class="v"></span><span class="p"></span>';
+      box.appendChild(el); dpsNodes.set(d.id, el);
+    }
+    el.querySelector('.bar i').style.background = d.c;
+    el.querySelector('.bar span').innerHTML = esc(d.name) + ' <small>' + esc(d.tag) + '</small>';
+    el.querySelector('.v').textContent = usd(d.v, d.v >= 100 ? 0 : 1);
+    el.querySelector('.p').textContent = Math.round(d.v / tot * 100) + '%';
+    el.title = d.name;
+    requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transform = 'translateY(' + (i * rowH) + 'px)'; el.querySelector('.bar i').style.width = (d.v / max * 100) + '%'; }));
+  });
+}
+seg('#dpsBy', (v) => { dpsBy = v; dpsNodes.forEach((el) => el.remove()); dpsNodes.clear(); renderDps(); });
+
+/* ================= usage: where the $ goes (donut + bars) ================= */
+function renderSplit() {
+  const ent = Object.entries(P.model).map(([k, c]) => ({ k, v: valT(c), t: tokT(c) })).filter((e) => e.t > 0).sort((a, b) => b.v - a.v);
+  const tot = ent.reduce((a, e) => a + e.v, 0), mm = (k) => MODELS[k] || [k, 'var(--s-neutral)'];
+  const R = 38, C = 2 * Math.PI * R; let off = 0;
+  let donut = '<svg width="92" height="92" viewBox="0 0 92 92"><g transform="rotate(-90 46 46)">';
+  ent.forEach((e) => { const len = e.v / tot * C; donut += '<circle class="dn" data-m="' + e.k + '" cx="46" cy="46" r="' + R + '" fill="none" stroke="' + mm(e.k)[1] + '" stroke-width="11" stroke-dasharray="' + Math.max(0, len - 1.5) + ' ' + C + '" stroke-dashoffset="' + (-off) + '"/>'; off += len; });
+  donut += '</g><text x="46" y="44" text-anchor="middle" font-size="13" font-weight="650" fill="var(--text)">' + usd(tot, 0) + '</text><text x="46" y="58" text-anchor="middle" font-size="9.5" fill="var(--dim)">' + ent.length + ' models</text></svg>';
+  const T = P.tot, val = valT(T), ord = [TYPES[1], TYPES[4], TYPES[0], TYPES[3], TYPES[2]].map((t) => ({ t, v: T[t.usd] || 0 })).sort((a, b) => b.v - a.v);
+  const bmax = ord[0].v || 1;
+  $('#split2').innerHTML = '<div class="donut">' + donut + '</div><div class="hb">' + ord.map((o) => '<div class="hbr"><span class="nm">' + o.t.name + '</span><span class="t"><i style="width:' + (o.v / bmax * 100) + '%;background:' + o.t.c + '"></i></span><span class="v">' + usd(o.v, o.v >= 100 ? 0 : 1) + '</span><span class="p">' + Math.round(o.v / val * 100) + '%</span></div>').join('') + '</div>';
+  $('#splitFig').innerHTML = ent.slice(0, 2).map((e) => '<i class="sw" style="background:' + mm(e.k)[1] + '"></i> ' + mm(e.k)[0] + ' <b>' + Math.round(e.v / tot * 100) + '%</b>').join(' &nbsp;');
+  $('#split2').querySelectorAll('.dn').forEach((c) => {
+    c.addEventListener('mousemove', (ev) => { const e = ent.find((x) => x.k === c.dataset.m); showTip('<div class="th">' + mm(e.k)[0] + '<span>' + Math.round(e.v / tot * 100) + '%</span></div><div class="kv"><span>API value</span><b>' + usd(e.v, 0) + '</b><span>Tokens</span><b>' + tok(e.t) + '</b></div>', ev.clientX, ev.clientY); });
+    c.addEventListener('mouseleave', hideTip);
+  });
+}
+
+/* ================= events strip ================= */
+function renderEvents() {
+  const T = periodData('today').tot, hit = T[2] / Math.max(1, T[0] + T[1] + T[2]);
+  const c = D.cold, wasted = c.reduce((a, e) => a + e.wasted, 0), rew = c.reduce((a, e) => a + e.tok, 0);
+  const lastHour = c.filter((e) => e.at > now() - 3600e3).length;
+  const comp = D.compactions.filter((e) => e.before), freed = comp.reduce((a, e) => a + e.before - (e.after || 0), 0);
+  const issues = [];
+  if (hit < 0.9) issues.push('hit rate under 90%');
+  if (lastHour > 8) issues.push(lastHour + ' cold starts in the last hour');
+  const ok = !issues.length, last = c[0];
+  $('#events').innerHTML = '<span class="eh" style="display:inline-flex;align-items:center;gap:6px;color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '"><span class="d" style="width:7px;height:7px;border-radius:50%;background:currentColor"></span>Cache ' + (ok ? 'OK' : 'anomaly') + '</span>' +
+    (ok ? '' : '<span class="ei" style="color:var(--warn)">' + issues.join(' · ') + '</span>') +
+    '<span class="ei">hit <b>' + (hit * 100).toFixed(1) + '%</b></span>' +
+    '<span class="ei">cold today <b>' + c.length + '</b> · ' + tok(rew) + ' rewritten · +' + usd(wasted) + '</span>' +
+    '<span class="ei">compactions <b>' + comp.length + '</b> · ' + tok(freed) + ' freed</span>' +
+    (last ? '<span class="ei"><span class="tm">last cold ' + hhmm(last.at) + '</span><span class="tt" title="' + esc(last.title) + '">' + esc(last.title) + '</span><span>' + esc(REASON[last.reason] || last.reason) + '</span></span>' : '') +
+    '<button class="all" data-open="cache">Details →</button>';
+}
+
+/* ---------- drawer: every detail lives here ---------- */
+function openDrawer(title, sub, body) {
+  $('#dTitle').textContent = title; $('#dSub').textContent = sub || ''; $('#dBody').innerHTML = body; $('#drawer').hidden = false; hideTip();
+}
+function closeDrawer() { $('#drawer').hidden = true; document.querySelectorAll('.ms.sel').forEach((x) => x.classList.remove('sel')); }
+$('#dClose').addEventListener('click', closeDrawer);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+document.addEventListener('mousedown', (e) => { if (!$('#drawer').hidden && !e.target.closest('#drawer, [data-open], .ms')) closeDrawer(); });
+const sub = (title, html) => '<div class="sub"><span class="label">' + title + '</span>' + html + '</div>';
+const convLi = (c, right) => '<div class="li"><span class="ag">' + esc(c.agent) + '</span><span class="t" title="' + esc(c.title) + '">' + esc(c.title) + '</span><span class="r">' + right + '</span></div>';
+function spark(vals, color) {
+  const W = 400, H = 40, n = vals.length, mx = Math.max(1, ...vals); if (!n) return '';
+  const pts = vals.map((v, i) => [(i / Math.max(1, n - 1)) * W, H - 2 - (v / mx) * (H - 4)]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  return '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"><defs><linearGradient id="spk" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + color + '" stop-opacity=".35"/><stop offset="1" stop-color="' + color + '" stop-opacity="0"/></linearGradient></defs>' +
+    '<path d="' + line + ' L' + W + ' ' + H + ' L0 ' + H + ' Z" fill="url(#spk)"/><path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>';
+}
+function openSeat(id) {
+  const s = D.seats.find((x) => x.id === id), st = seatState(s);
+  document.querySelectorAll('.ms').forEach((x) => x.classList.toggle('sel', x.dataset.seat === id));
+  const pastReset = s.five && st.eta > s.five.resetsAt - now();
+  const cold = D.cold.filter((e) => e.seat === id);
+  openDrawer(s.label, s.plan + (s.org === 'team' ? ' · Team low-poly' : ' · personal, last resort'),
+    sub('Quota', '<div class="kv"><span>5h left</span><b>' + st.fiveLeft + '% · resets ' + dur(s.five.resetsAt - now()) + '</b>' +
+      '<span>Week left</span><b>' + (s.week ? st.weekLeft + '% · resets ' + dur(s.week.resetsAt - now()) : 'not reported') + '</b>' +
+      (s.fableWeek ? '<span>Fable week left</span><b>' + (100 - s.fableWeek.pct) + '%</b>' : '') +
+      '<span>Burn</span><b>' + st.burn.toFixed(1) + ' %/h</b><span>At this pace</span><b style="color:' + (pastReset ? 'var(--ok)' : 'var(--warn)') + '">' + (pastReset ? 'lasts past reset' : 'empty in ' + dur(st.eta)) + '</b>' +
+      '<span>Hit 100% today</span><b>' + (s.hitsToday ? '×' + s.hitsToday : 'never') + '</b><span>Advisor</span><b>' + (s.advisor ? 'Fable' : 'not in plan') + '</b></div>') +
+    sub('Last 24h', spark(s.spark, SEAT_COLORS[s.id]) + '<div class="kv"><span>Today</span><b>' + tok(s.todayTok) + ' · ' + usd(s.todayUsd, 0) + '</b><span>Requests, all time</span><b>' + s.requests.toLocaleString('en-US') + '</b></div>') +
+    sub('Threads · ' + s.threads.length, s.threads.length ? '<div class="list">' + s.threads.map((t) => '<div class="li"><span class="bd' + (t.busy ? '' : ' idle') + '"></span><span class="t" title="' + esc(t.title) + '"><span class="ag">' + esc(t.agent) + '</span> ' + esc(t.title) + '</span><span class="r">' + tok(t.ctx) + '</span></div>').join('') + '</div>' : '<span class="dim">Idle · last turn ' + dur(now() - s.lastUsedAt) + ' ago</span>') +
+    (cold.length ? sub('Cold cache today · ' + cold.length, '<div class="list">' + cold.map((e) => convLi(e, hhmm(e.at) + ' · <b>' + tok(e.tok) + '</b>')).join('') + '</div>') : ''));
+}
+const OPEN = {
+  cost() {
+    const T = P.tot, value = valT(T), nocache = T[9];
+    const ord = [TYPES[2], TYPES[1], TYPES[0], TYPES[3], TYPES[4]];
+    const bar = (parts, sc) => '<div class="stack">' + parts.map((p) => '<i style="width:' + (p[1] / sc * 100) + '%;background:' + p[0] + '"></i>').join('') + '</div>';
+    return ['API cost', periodLabel(),
+      sub('Actual vs without cache', bar(ord.map((t) => [t.c, T[t.usd] || 0]), nocache) + '<div style="height:4px"></div>' + bar([['repeating-linear-gradient(135deg,var(--panel-3) 0 5px,var(--panel-2) 5px 10px)', nocache]], nocache) +
+        '<div class="kv"><span>Actual</span><b>' + usd(value, 0) + '</b><span>Without cache</span><b>' + usd(nocache, 0) + '</b></div>') +
+      sub('By type', '<div class="kv">' + ord.map((t) => '<span><i class="sw" style="background:' + t.c + '"></i> ' + t.name + ' · ' + tok(T[t.tok] || 0) + '</span><b>' + usd(T[t.usd] || 0) + '</b>').join('') +
+        '<span>Requests</span><b>' + (T[8] || 0).toLocaleString('en-US') + '</b><span>Per request</span><b>' + usd(value / Math.max(1, T[8]), 3) + '</b></div>') +
+      sub('By seat', '<div class="kv">' + Object.entries(P.seat).filter(([k]) => k !== 'unknown').sort((a, b) => valT(b[1]) - valT(a[1])).map(([k, c]) => '<span><i class="sw" style="background:' + SEAT_COLORS[k] + '"></i> ' + esc(short(k)) + ' · ' + tok(tokT(c)) + '</span><b>' + usd(valT(c), 0) + '</b>').join('') +
+        (P.seat.unknown ? '<span class="dim">before seat tracking · ' + tok(tokT(P.seat.unknown)) + '</span><b class="dim">' + usd(valT(P.seat.unknown), 0) + '</b>' : '') + '</div>') +
+      sub('Top conversations · today', '<div class="list">' + D.convs.slice(0, 15).map((c) => convLi(c, '<b>' + usd(c.usd) + '</b> · ' + tok(c.tok))).join('') + '</div>')];
+  },
+  cache() {
+    const T = P.tot, wasted = D.cold.reduce((a, e) => a + e.wasted, 0), rew = D.cold.reduce((a, e) => a + e.tok, 0);
+    const reasons = {}; D.cold.forEach((e) => { const r = REASON[e.reason] || e.reason; reasons[r] = (reasons[r] || 0) + 1; });
+    const m = D.modesToday, mAll = Object.values(m).reduce((a, b) => a + b, 0);
+    return ['Cache', periodLabel(),
+      sub('Saved', '<div class="kv"><span>Without cache</span><b>' + usd(T[9], 0) + '</b><span>Actual</span><b>' + usd(valT(T), 0) + '</b><span>Saved</span><b style="color:var(--ok)">' + usd(T[9] - valT(T), 0) + '</b>' +
+        '<span>Read from cache</span><b>' + tok(T[2]) + '</b><span>Written to cache</span><b>' + tok(T[1]) + '</b></div>') +
+      sub('Sessions today · ' + mAll.toLocaleString('en-US') + ' turns', '<div class="kv">' + Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => '<span>' + k + '</span><b>' + v.toLocaleString('en-US') + ' · ' + Math.round(v / mAll * 100) + '%</b>').join('') + '</div>') +
+      sub('Cold cache today · ' + D.cold.length + ' · ' + tok(rew) + ' rewritten · +' + usd(wasted), '<div class="kv">' + Object.entries(reasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => '<span>' + k + '</span><b>' + v + '</b>').join('') + '</div>' +
+        '<div class="list">' + D.cold.map((e) => convLi(e, hhmm(e.at) + ' · ' + esc(short(e.seat)) + ' · <b>' + tok(e.tok) + '</b>')).join('') + '</div>') +
+      sub('Compactions today · ' + D.compactions.length, '<div class="list">' + D.compactions.map((e) => convLi(e, hhmm(e.at) + ' · ' + tok(e.before) + ' → <b>' + tok(e.after) + '</b>')).join('') + '</div>')];
+  },
+  tokens() {
+    const T = P.tot;
+    return ['Tokens', periodLabel(),
+      sub('By type', '<div class="kv">' + TYPES.map((t) => '<span><i class="sw" style="background:' + t.c + '"></i> ' + t.name + '</span><b>' + tok(T[t.tok] || 0) + ' · ' + Math.round((T[t.tok] || 0) / tokT(T) * 100) + '%</b>').join('') + '</div>') +
+      sub('Daily', '<div class="kv">' + D.daily.slice().reverse().map((d) => '<span>' + dayName(d.d) + '</span><b>' + tok(tokT(d.tot)) + ' · ' + usd(valT(d.tot), 0) + '</b>').join('') + '</div>') +
+      sub('Fun', '<div class="kv"><span>Novels (≈120k tokens)</span><b>' + Math.round(tokT(T) / 120000).toLocaleString('en-US') + '</b><span>English Wikipedia (≈6.2G)</span><b>×' + (tokT(T) / 6.2e9).toFixed(2) + '</b></div>')];
+  },
+  sub() {
+    const perDay = valT(periodData('24h').tot);
+    return ['Subscription vs API', '',
+      sub('Plan', '<div class="kv"><span>4 × Team standard</span><b>$100</b><span>4 × Team premium</span><b>$500</b><span>Max (personal)</span><b>$200</b><span>Total</span><b>' + usd(SUB_MONTH, 0) + ' / mo</b></div>') +
+      sub('Return', '<div class="kv"><span>This period</span><b>' + usd(valT(P.tot), 0) + ' · ×' + Math.round(valT(P.tot) / (SUB_DAY * P.span)) + '</b><span>Pace, last 24h</span><b>' + usd(perDay, 0) + ' / day</b>' +
+        '<span>Monthly projection</span><b>' + usd(perDay * 30.4, 0) + '</b><span>Return on subscription</span><b style="color:var(--ok)">×' + Math.round(perDay * 30.4 / SUB_MONTH) + '</b></div>')];
+  },
+  models() {
+    const ent = Object.entries(P.model).map(([k, c]) => ({ k, c })).filter((e) => tokT(e.c) > 0).sort((a, b) => valT(b.c) - valT(a.c));
+    return ['Models', periodLabel(), sub('API value', '<div class="kv">' + ent.map((e) => { const m = MODELS[e.k] || [e.k, 'var(--s-neutral)'];
+      return '<span><i class="sw" style="background:' + m[1] + '"></i> ' + m[0] + ' · ' + tok(tokT(e.c)) + '</span><b>' + usd(valT(e.c), 0) + '</b>'; }).join('') + '</div>')];
+  },
+  agents() {
+    const ag = agents(), cov = D.convs.reduce((a, c) => a + c.usd, 0);
+    return ['Agents', 'today · ' + usd(cov, 0) + ' attributed of ' + usd(valT(D.daily[D.daily.length - 1].tot), 0),
+      sub('Ranking', '<div class="kv">' + ag.map((a, i) => '<span>' + (i + 1) + '. ' + esc(a.name) + ' · ' + a.n + ' conv</span><b>' + usd(a.usd) + ' · ' + tok(a.tok) + '</b>').join('') + '</div>') +
+      sub('Top conversations · ' + D.convCount, '<div class="list">' + D.convs.slice(0, 20).map((c) => convLi(c, '<b>' + usd(c.usd) + '</b> · ' + c.req + ' req' + (c.cold ? ' · ' + c.cold + ' cold' : ''))).join('') + '</div>')];
+  },
+  records() {
+    const hours = D.hourly.slice().sort((a, b) => tokT(b.tot) - tokT(a.tot)).slice(0, 5);
+    const best = D.daily.slice().sort((a, b) => valT(b.tot) - valT(a.tot))[0];
+    const all = D.daily.reduce((a, d) => addc(a, d.tot), []);
+    return ['Records', '',
+      sub('Top hours', '<div class="kv">' + hours.map((h) => '<span>' + new Date(h.t).toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + hh(h.t) + ':00</span><b>' + tok(tokT(h.tot)) + ' · ' + usd(valT(h.tot), 0) + '</b>').join('') + '</div>') +
+      sub('Best day', '<div class="kv"><span>' + dayName(best.d) + '</span><b>' + usd(valT(best.tot), 0) + ' · ' + tok(tokT(best.tot)) + '</b><span>Billion-token days</span><b>' + D.daily.filter((d) => tokT(d.tot) > 1e9).length + ' in a row</b></div>') +
+      sub('Since tracking', '<div class="kv"><span>Tokens</span><b>' + tok(tokT(all)) + '</b><span>API value</span><b>' + usd(valT(all), 0) + '</b><span>Without cache</span><b>' + usd(all[9], 0) + '</b><span>Fable advisor</span><b>' + usd(all[11] || 0, 0) + '</b><span>Requests</span><b>' + (all[8] || 0).toLocaleString('en-US') + '</b></div>') +
+      sub('Biggest threads · today', '<div class="list">' + D.convs.slice().sort((a, b) => b.tok - a.tok).slice(0, 8).map((c) => convLi(c, '<b>' + tok(c.tok) + '</b>')).join('') + '</div>')];
+  },
+};
+const periodLabel = () => ({ '5h': 'last 5 hours', today: 'today', '7d': 'last 7 days', all: 'since tracking began' })[P.p];
+
+
+
+
+OPEN.seats = () => ['Seats', D.seats.length + ' seats',
+  sub('5h · week · burn', '<div class="kv">' + D.seats.map((s) => { const st = seatState(s);
+    return '<span>' + esc(short(s.id)) + ' · ' + s.plan + ' · ' + st.status + '</span><b>' + st.fiveLeft + '% · ' + (s.week ? st.weekLeft + '%' : '—') + ' · ' + (st.burn == null ? '—' : st.burn.toFixed(1) + '%/h') + '</b>'; }).join('') + '</div>')];
+OPEN.threads = () => ['Threads', D.seats.reduce((a, s) => a + s.threads.length, 0) + ' running',
+  D.seats.filter((s) => s.threads.length).map((s) => sub(short(s.id) + ' · ' + s.threads.length, '<div class="list">' + s.threads.map((t) => '<div class="li"><span class="bd' + (t.busy ? '' : ' idle') + '"></span><span class="t" title="' + esc(t.title) + '"><span class="ag">' + esc(t.agent) + '</span> ' + esc(t.title) + '</span><span class="r">' + tok(t.ctx) + '</span></div>').join('') + '</div>')).join('')];
+// one delegated listener: every [data-open] (KPI, strip, link) and every [data-seat] (row, KPI) opens the drawer
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.seg')) return;
+  const o = e.target.closest('[data-open]');
+  if (o) {
+    document.querySelectorAll('.tr.sel').forEach((x) => x.classList.remove('sel'));
+    const parts = o.dataset.open.split('+').map((k) => OPEN[k]());
+    return openDrawer(parts[0][0], parts[0][1], parts.map((r, i) => (i ? '<div style="font-size:13px;font-weight:600;margin-top:4px">' + r[0] + '</div>' : '') + r[2]).join(''));
+  }
+  const s = e.target.closest('[data-seat]');
+  if (s && !e.target.closest('#drawer')) {
+    openSeat(s.dataset.seat);
+    document.querySelectorAll('.bub').forEach((x) => x.classList.toggle('sel', x.dataset.seat === s.dataset.seat));
+  }
+});
+document.addEventListener('mousedown', (e) => { if (!$('#drawer').hidden && !e.target.closest('#drawer, [data-open], [data-seat]')) document.querySelectorAll('.tr.sel').forEach((x) => x.classList.remove('sel')); });
+
+/* ================= tabs, density, boot ================= */
+let tab = 'seats';
+function renderAll(anim) {
+  P = periodData(getPeriod());
+  renderSeatKpis(); renderSeatRows(); drawQuota(anim);
+  renderUseKpis(); drawChart(anim); renderMeter(); renderDps(); renderSplit(); renderEvents();
+}
+function render(anim) { P = periodData(getPeriod()); renderUseKpis(); drawChart(anim); drawQuota(anim); renderMeter(); renderDps(); renderSplit(); renderEvents(); }
+document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x === b));
+  document.body.classList.toggle('t-seats', tab === 'seats'); document.body.classList.toggle('t-usage', tab === 'usage');
+  closeDrawer(); renderAll(true);
+}));
+seg('#density', (v) => { document.body.classList.toggle('compact', v === 'compact'); document.body.classList.toggle('balanced', v === 'balanced'); dpsNodes.forEach((el) => el.remove()); dpsNodes.clear(); renderAll(true); stamp(); });
+setInterval(() => document.querySelectorAll('[data-reset]').forEach((el) => { const r = +el.dataset.reset; if (r) el.textContent = el.classList.contains('v') ? dur(r - now()) : dur(r - now()).replace(/ \d+s$/, ''); }), 1000);
+let rz = null;
+['#chartWrap', '#quotaWrap'].forEach((q) => new ResizeObserver(() => { if (q === '#chartWrap') drawChart(false); else drawQuota(false); }).observe($(q)));
+new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => { drawChart(false); drawQuota(false); renderDps(); stamp(); }, 120); }).observe($('#app'));
+function stamp() { document.documentElement.dataset.fit = document.body.scrollHeight + '/' + innerHeight + ' app ' + $('#app').scrollHeight + '/' + $('#app').clientHeight; }
+if (location.hash === '#usage') { tab = 'usage'; document.body.classList.replace('t-seats', 't-usage'); document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x.dataset.tab === 'usage')); }
+if (location.hash === '#compact') { document.body.classList.replace('balanced', 'compact'); document.querySelectorAll('#density button').forEach((x) => x.classList.toggle('on', x.dataset.v === 'compact')); }
+$('#snapT') && ($('#snapT').textContent = '');
+renderAll(true);
+setTimeout(stamp, 1500);
+
+</script>
+</body>
+</html>

@@ -27,6 +27,10 @@ import {
 import { SessionIndex } from './session/sessions.js';
 import { registerSessionTools } from './session/tools.js';
 import { registerUsageHistory } from './usage/register.js';
+import { UsageJournal } from './usage/journal.js';
+import { ServedStats, instrumentServed } from './usage/served.js';
+import { registerSeatsUsage } from './usage/seatsUsageAction.js';
+import { resolvePlanWeights } from './usage/planWeights.js';
 import { ensureSharedSessionDirs } from './accounts/sharedSessions.js';
 import {
   ClaudeSessionAdapter,
@@ -269,6 +273,7 @@ let runnerRef: SessionRunner | null = null;
 let adapterRef: ClaudeSessionAdapter | null = null;
 let providerRef: ClaudeCodeProvider | null = null;
 let usageHistoryRef: { stop(): void } | null = null;
+let servedRef: ServedStats | null = null;
 
 const plugin: AlfredPlugin = {
   id: 'claude-code',
@@ -360,10 +365,36 @@ const plugin: AlfredPlugin = {
     // What runs on Claude right now, for the panel (webview/activity.ts).
     const activity = new ActivityBoard({ seatLabel: (id) => pool.get(id)?.label });
     instrumentProvider(provider, activity, pool);
+    // Cold-cache / compaction journal and per-thread facts of every served
+    // request (usage/served.ts); each one pokes the transcript scan so
+    // throughput and per-thread spend follow traffic within seconds.
+    const journal = new UsageJournal(join(ctx.dataDir, 'usage-journal.jsonl'), ctx.logger);
+    const served = new ServedStats(join(ctx.dataDir, 'usage-served.json'), journal);
+    servedRef = served;
+    let scanSoon: ReturnType<typeof setTimeout> | null = null;
+    instrumentServed(provider, served, () => {
+      if (scanSoon) return;
+      scanSoon = setTimeout(() => {
+        scanSoon = null;
+        void history.scanner.scan().catch(() => undefined);
+      }, 3_000);
+      scanSoon.unref?.();
+    });
     ctx.registerProvider(provider);
     ctx.registerWebview(createDashboardWebview());
     // Token history for the panel's Usage section (usage/), from the transcripts.
-    usageHistoryRef = registerUsageHistory(ctx, pool, sessionIndex);
+    const history = registerUsageHistory(ctx, pool, sessionIndex);
+    usageHistoryRef = history;
+    registerSeatsUsage(ctx, {
+      pool,
+      history,
+      journal,
+      stats: served,
+      activity,
+      advisor,
+      weights: resolvePlanWeights(ctx.config),
+      nextModel: firstModel(cfg.modelsRaw),
+    });
 
     // Full Claude Code agent sessions, delegated by Alfred agents.
     const runner = new SessionRunner({
@@ -660,6 +691,8 @@ const plugin: AlfredPlugin = {
     poolRef = null;
     usageHistoryRef?.stop();
     usageHistoryRef = null;
+    servedRef?.stop();
+    servedRef = null;
   },
 };
 

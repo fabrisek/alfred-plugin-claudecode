@@ -9,7 +9,7 @@
  * `--local` checks a page that the running Alfred has not loaded yet (the
  * bundle is rebuilt on restart) against the actions it does have.
  *
- * Read-only: it only lets the page poll, plus `refreshUsage`. Nothing that
+ * Read-only: it only lets the page poll and switches tabs. Nothing that
  * opens a login window, spends quota or changes a seat is clicked here (the
  * unit test covers every button against a fake bridge).
  */
@@ -55,12 +55,9 @@ async function main(): Promise<void> {
     await new Promise((r) => setTimeout(r, 400));
     await page.settle();
   }
-  const refresh = page.$('refreshAll');
-  if (refresh) {
-    await page.click(refresh);
-    await new Promise((r) => setTimeout(r, 4000));
-    await page.settle();
-  }
+  const seatsText = page.$('kSeat')?.textContent.replace(/\s+/g, ' ').trim();
+  await page.click(page.doc.querySelector('.tab[data-tab=usage]'));
+  const clean = (id: string): string | undefined => page.$(id)?.textContent.replace(/\s+/g, ' ').trim();
   const out = {
     webview: wv.id,
     errors: page.errors,
@@ -69,10 +66,15 @@ async function main(): Promise<void> {
     calls: page.calls.map((c) => c.action).reduce<Record<string, number>>((m, a) => ((m[a] = (m[a] ?? 0) + 1), m), {}),
     timingsMs: Object.fromEntries(Object.entries(timings).map(([k, v]) => [k, Math.max(...v)])),
     innerHTMLWrites: { firstLoad: writesAfterLoad, total: page.doc.stats.innerHTMLWrites },
-    rows: page.doc.querySelectorAll('tbody tr').map((tr) => `${tr.getAttribute('data-key')}: ${tr.textContent.replace(/\s+/g, ' ').trim()}`),
-    stats: page.$('stats')?.textContent,
-    flash: page.$('flash')?.textContent,
-    text: page.doc.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 3000),
+    seats: page.doc.querySelectorAll('#seatRows .bub').map((b) => `${b.getAttribute('data-seat')}: ${b.textContent.replace(/\s+/g, ' ').trim()}`),
+    seatKpis: seatsText,
+    usageKpis: clean('kUse'),
+    leaderboard: clean('dps'),
+    whereTheMoneyGoes: clean('split2'),
+    cacheHealth: clean('events'),
+    poolCurveDrawn: (page.$('quotaSvg')?.innerHTML.length ?? 0) > 0,
+    chartDrawn: (page.$('chart')?.innerHTML.length ?? 0) > 0,
+    conn: clean('conn'),
   };
   console.log(JSON.stringify(out, null, 2));
   process.exit(page.errors.length ? 1 : 0);
