@@ -5,6 +5,7 @@ import type {
   LLMProvider,
   Logger,
   Message,
+  ModelDetails,
   ModelInfo,
 } from '@alfred/sdk';
 // Not an OpenAI-compatible backend — the transport here is a child process, not
@@ -19,6 +20,7 @@ import { engineThread, isAdvisorRefusal, type AdvisorPolicy } from './accounts/a
 import { ToolCallCutter } from './toolCallCutter.js';
 import { markerNotes } from './hostCutNote.js';
 import { coerceNativeArgs } from './nativeArgs.js';
+import { contextWindowOf, modelDetailsOf } from './modelContext.js';
 import {
   ASSISTANT_SLOT,
   CACHE_TTL_1H,
@@ -74,6 +76,11 @@ export type ClaudeCodeConfig = {
   modelsRaw: string;
   /** Context window reported for every exposed model. */
   contextWindow: number;
+  /**
+   * Prompt size at which the host should compact a conversation (see
+   * modelContext.ts). Undefined = the default; 0 = no budget, only the window.
+   */
+  compactAtTokens?: number;
   /** Optional absolute path to the `claude` binary. Empty = auto-detect. */
   pathToClaude: string;
   /**
@@ -448,6 +455,14 @@ export class ClaudeCodeProvider implements LLMProvider {
       // leaving raw markup in the reply.
       textToolCallFormats: ['qwen_json', 'claude_xml'],
     };
+  }
+
+  /**
+   * Real context window per model and the compaction budget, for the host's
+   * compaction trigger (modelContext.ts).
+   */
+  async getModelInfo(name: string): Promise<ModelDetails> {
+    return modelDetailsOf(name, this.opts.config.compactAtTokens);
   }
 
   async listModels(): Promise<ModelInfo[]> {
@@ -1810,7 +1825,10 @@ function parseModels(raw: string, contextWindow: number, providerId: string): Mo
       id,
       providerId,
       displayName,
-      contextWindow: contextWindow > 0 ? contextWindow : 200000,
+      // The model's real window (what the CLI reports); the setting only
+      // covers an id modelContext.ts does not know. A flat 200k here made the
+      // host believe Opus, Sonnet and Fable had a fifth of their 1M window.
+      contextWindow: contextWindowOf(id) ?? (contextWindow > 0 ? contextWindow : 200000),
       capabilities: { tools: false, thinking: true, vision: true },
     });
   }

@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts tests/modelContext.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
@@ -140,10 +140,19 @@
       "contextWindow": {
         "type": "number",
         "label": "Context window",
-        "description": "Context window (tokens) reported for every exposed model. Used by the UI for the context gauge.",
+        "description": "Context window (tokens) reported for a model id the plugin does not recognise. Known Claude models report their real window (Opus, Sonnet, Fable: 1M; Haiku: 200k).",
         "default": 200000,
         "min": 1000,
         "step": 1000,
+        "group": "Catalog"
+      },
+      "compactAtTokens": {
+        "type": "number",
+        "label": "Compact conversations at (tokens)",
+        "description": "Prompt size at which Alfred compacts an engine conversation (summary of the older turns, recent ones kept verbatim), even though the model's window is larger. Every call re-reads the whole prompt and every cache miss re-writes it, so a smaller prompt saves seat quota. 0 = compact only when the window itself is nearly full.",
+        "default": 200000,
+        "min": 0,
+        "step": 10000,
         "group": "Catalog"
       },
       "requestTimeoutMs": {

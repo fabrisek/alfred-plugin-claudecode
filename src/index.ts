@@ -58,6 +58,10 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
     oauthToken: String(raw.oauthToken ?? '').trim(),
     modelsRaw: String(raw.models ?? '').trim() || DEFAULT_MODELS.join(', '),
     contextWindow: ctx,
+    compactAtTokens:
+      typeof raw.compactAtTokens === 'number' && Number.isFinite(raw.compactAtTokens) && raw.compactAtTokens >= 0
+        ? raw.compactAtTokens
+        : undefined,
     pathToClaude: String(raw.pathToClaude ?? '').trim(),
     requestTimeoutMs:
       typeof raw.requestTimeoutMs === 'number' &&
