@@ -186,7 +186,7 @@ export class SessionRunner {
         request = { ...request, cwd: recorded };
       }
     } else {
-      const pick = pool.pick({ model: request.model });
+      const pick = pool.pick({ model: request.model, place: { source: 'claude_code_run' } });
       if (!pick.account) return { code: 'unavailable', error: pick.reason };
       first = pick.account;
     }

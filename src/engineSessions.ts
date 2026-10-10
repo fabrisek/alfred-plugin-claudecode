@@ -525,6 +525,20 @@ export class EngineSessions {
   }
 
   /**
+   * Live processes waiting for their thread's next request, per seat: the
+   * threads that will come back to that seat (pool load source). A busy one
+   * is already counted as a request in flight.
+   */
+  idleBySeat(): Map<string, number> {
+    const bySeat = new Map<string, number>();
+    for (const s of this.live.values()) {
+      if (s.dead || s.busy) continue;
+      bySeat.set(s.accountId, (bySeat.get(s.accountId) ?? 0) + 1);
+    }
+    return bySeat;
+  }
+
+  /**
    * Plugin unloading (reload, gateway stop). Idle processes are closed now. A
    * busy one is mid-reply for a conversation: killing it ends that reply with
    * "process ended before its reply" (what a plugin reload used to do to every

@@ -1010,7 +1010,7 @@ function render() {
   tick();
 }
 
-var STRATEGY_NAMES = { drain: 'use it or lose it', fill: 'fill in order', spread: 'spread' };
+var STRATEGY_NAMES = { headroom: 'most quota left', drain: 'use it or lose it', fill: 'fill in order', spread: 'spread' };
 var tab = 'seats';
 function showTab(name) {
   tab = name === 'usage' ? 'usage' : 'seats';
@@ -1737,7 +1737,7 @@ export function renderDashboard(): string {
   <span class="pill err" id="conn" hidden>offline</span>
   <span class="spacer"></span>
   <label class="in" title="use it or lose it: the seat whose quota resets soonest with the most left; fill: the first seat in order until the threshold; spread: balance across seats"><span class="lbl">Strategy</span>
-    <select class="field" id="strategy"><option value="drain">use it or lose it</option><option value="fill">fill in order</option><option value="spread">spread</option></select></label>
+    <select class="field" id="strategy"><option value="headroom">most quota left</option><option value="drain">use it or lose it</option><option value="fill">fill in order</option><option value="spread">spread</option></select></label>
   <label class="in" title="Usage % at which a seat stops taking new work"><span class="lbl">Switch at</span>
     <input type="number" class="field n" id="threshold" min="1" max="100">%</label>
   <button id="refreshAll" title="Refresh the usage of every seat">Refresh all</button>

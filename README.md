@@ -72,7 +72,16 @@ Alfred sidebar.
 
 ### Selection and switching
 
-- **Fill** (default): highest-priority enabled, logged-in seat until any window
+- **Most quota left** (`headroom`, default): the seat with the most quota left
+  on its tightest window for the model (the real gauge), divided among the
+  threads already living there: `left / (threads + 1)`, threads = requests in
+  flight plus idle processes kept warm. Many parallel agents spread over the
+  seats instead of draining one together and all moving at once. Seats under
+  the threshold first; ties: the manual order. Each placement is logged
+  (`thread placed on a seat`, with the runner-up seats).
+- **Use it or lose it** (`drain`): the most headroom per hour left before the
+  seat's next reset.
+- **Fill**: highest-priority enabled, logged-in seat until any window
   relevant to the requested model reaches the threshold (default 90 %), then
   the seat with the most headroom (ties: earliest reset).
 - **Spread**: least-utilised seat first (ties: fewer in-flight requests).

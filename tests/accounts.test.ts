@@ -186,6 +186,7 @@ describe('selection', () => {
 
   it('fill: a busy seat lets the next seat under the threshold take the overflow', () => {
     const pool = makePool(3);
+    pool.updateSettings({ strategy: 'fill' });
     const [a, b, c] = pool.list();
     for (const x of [a, b, c]) pool.setUsage(x.id, usageAt(10));
     const cap = pool.settings.fillMaxInFlight;

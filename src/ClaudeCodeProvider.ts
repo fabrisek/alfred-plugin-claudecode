@@ -380,10 +380,14 @@ export class ClaudeCodeProvider implements LLMProvider {
 
   private readonly log: Logger;
   private readonly sessions: EngineSessions | null;
+  private readonly dropLoadSource: () => void;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
     this.log = opts.logger ?? noopLogger;
     this.sessions = opts.sessionsDir ? new EngineSessions(opts.sessionsDir, this.log) : null;
+    // Threads kept warm on a seat weigh on where the next new thread goes.
+    const sessions = this.sessions;
+    this.dropLoadSource = sessions ? opts.pool.addLoadSource(() => sessions.idleBySeat()) : () => {};
   }
 
   /**
@@ -540,7 +544,7 @@ export class ClaudeCodeProvider implements LLMProvider {
           if (req.signal?.aborted) throw abortError();
         }
       }
-      const pick = pool.pick({ model, pinned, exclude: tried, prefer });
+      const pick = pool.pick({ model, pinned, exclude: tried, prefer, place: { thread: sessionKey, source: 'engine' } });
       if (!pick.account) throw new Error(`${LABEL}: ${pick.reason}`);
       const account = pick.account;
       if (sessionKey && prefer && account.id !== prefer) {
@@ -1549,6 +1553,7 @@ export class ClaudeCodeProvider implements LLMProvider {
 
   /** Close every live engine session (plugin deactivation). */
   dispose(): void {
+    this.dropLoadSource();
     this.sessions?.dispose();
   }
 }

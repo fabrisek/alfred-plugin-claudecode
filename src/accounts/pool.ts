@@ -23,7 +23,7 @@ import {
 import { drainReason, drainScore } from './drain.js';
 
 export type AuthKind = 'login' | 'token';
-export type Strategy = 'fill' | 'spread' | 'drain';
+export type Strategy = 'headroom' | 'fill' | 'spread' | 'drain';
 
 export type Account = {
   id: string;
@@ -70,7 +70,10 @@ export type PoolSettings = {
   strategy: Strategy;
   /** Set once the saved strategy went through the `drain` default (see withDrainDefault). */
   drainDefaulted?: boolean;
-  /** Revision of that migration: 2 = drain made the default again over a saved fill (2026-10-09). */
+  /**
+   * Revision of that migration: 2 = drain made the default again over a saved
+   * fill (2026-10-09); 3 = `headroom` replaces a saved drain or fill (2026-10-10).
+   */
   strategyRev?: number;
   /** Seat order in the panel: the manual order, or the soonest 5h reset first. */
   seatSort?: 'manual' | 'reset';
@@ -139,7 +142,7 @@ type StateFile = {
 
 type SecretsFile = { tokens: Record<string, string> };
 
-export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'drain', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 };
+export const DEFAULT_SETTINGS: PoolSettings = { strategy: 'headroom', threshold: 90, usagePollMinutes: 5, fillMaxInFlight: 4 };
 
 /** How long a seat sits out after a bare 429 (no quota rejection, no reset time). */
 export const THROTTLE_BACKOFF_MS = 20_000;
@@ -163,8 +166,14 @@ function addTo(t: Tally, s: TokenSample, requests = 1): void {
 const DEFAULT_ACCOUNT_ID = 'default';
 
 export type PickResult =
-  | { account: Account; reason?: undefined }
-  | { account?: undefined; reason: string };
+  | { account: Account; reason?: undefined; why?: string }
+  | { account?: undefined; reason: string; why?: undefined };
+
+/** Who asks for a seat, when the pick places a new thread (logged). */
+export type Placement = { thread?: string | null; source: string };
+
+/** Idle threads a component keeps on each seat (live processes between two requests). */
+export type ThreadLoadSource = () => ReadonlyMap<string, number>;
 
 export type PoolOptions = {
   dataDir: string;
@@ -182,6 +191,7 @@ export class AccountPool {
   private readonly now: () => number;
   private readonly statePath: string;
   private readonly secretsPath: string;
+  private readonly loadSources = new Set<ThreadLoadSource>();
 
   constructor(private readonly opts: PoolOptions) {
     this.now = opts.now ?? Date.now;
@@ -225,7 +235,8 @@ export class AccountPool {
           },
         ],
         runtime: {},
-        settings: { ...DEFAULT_SETTINGS },
+        // A new install starts on the current default: no migration to run.
+        settings: { ...DEFAULT_SETTINGS, strategyRev: 3 },
         recent: [],
         tokens: {},
       };
@@ -279,7 +290,9 @@ export class AccountPool {
 
   updateSettings(patch: Partial<PoolSettings>): PoolSettings {
     const s = this.state.settings;
-    if (patch.strategy === 'fill' || patch.strategy === 'spread' || patch.strategy === 'drain') s.strategy = patch.strategy;
+    if (patch.strategy === 'headroom' || patch.strategy === 'fill' || patch.strategy === 'spread' || patch.strategy === 'drain') {
+      s.strategy = patch.strategy;
+    }
     if (patch.seatSort === 'manual' || patch.seatSort === 'reset') s.seatSort = patch.seatSort;
     if (typeof patch.threshold === 'number' && Number.isFinite(patch.threshold)) {
       s.threshold = Math.min(100, Math.max(1, Math.round(patch.threshold)));
@@ -313,6 +326,29 @@ export class AccountPool {
 
   inFlightOf(id: string): number {
     return this.inFlight.get(id) ?? 0;
+  }
+
+  /** Register a count of the threads a component keeps per seat; returns its removal. */
+  addLoadSource(source: ThreadLoadSource): () => void {
+    this.loadSources.add(source);
+    return () => this.loadSources.delete(source);
+  }
+
+  /**
+   * Threads living on a seat: requests in flight (every kind) plus the idle
+   * threads the load sources keep there (a conversation's process kept warm
+   * within its cache TTL, waiting for its next request).
+   */
+  threadsOn(id: string): number {
+    let idle = 0;
+    for (const source of this.loadSources) {
+      try {
+        idle += source().get(id) ?? 0;
+      } catch {
+        // a broken source counts nothing
+      }
+    }
+    return idle + this.inFlightOf(id);
   }
 
   get recent(): ServedRecord[] {
@@ -674,6 +710,12 @@ export class AccountPool {
    * - `drain` ("use it or lose it"): the seat under the threshold with the
    *   most headroom per hour left before its next reset (accounts/drain.ts);
    *   ties: the user's order. Busy seats overflow as with `fill`.
+   * - `headroom` (default): the seat with the most quota left on its tightest
+   *   window (the real gauge), shared among the threads already living on it:
+   *   `left / (threads + 1)`. Parallel agents spread over the seats instead of
+   *   draining one together and all moving at once, each move re-writing a
+   *   whole conversation. Seats under the threshold first; ties: the user's
+   *   order.
    *
    * Either way a conversation already on a seat stays there for as long as
    * that seat can serve (`prefer`): its prompt cache lives there, and moving
@@ -683,7 +725,22 @@ export class AccountPool {
    *
    * A pinned seat is tried first when usable; otherwise the pool takes over.
    */
-  pick(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string }): PickResult {
+  pick(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string; place?: Placement }): PickResult {
+    const r = this.choose(args);
+    if (args.place && r.account && r.why) {
+      this.opts.logger.info('thread placed on a seat', {
+        source: args.place.source,
+        thread: args.place.thread ?? undefined,
+        account: r.account.id,
+        strategy: this.state.settings.strategy,
+        why: r.why,
+        ...(args.prefer && args.prefer !== r.account.id ? { from: args.prefer } : {}),
+      });
+    }
+    return r;
+  }
+
+  private choose(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string }): PickResult {
     const now = this.now();
     const { threshold, strategy } = this.state.settings;
     const exclude = args.exclude ?? new Set<string>();
@@ -709,6 +766,25 @@ export class AccountPool {
       reset: blockingReset(this.runtime(a.id).usage, args.model, threshold, now) ?? Infinity,
       busy: this.inFlightOf(a.id),
     }));
+    if (strategy === 'headroom') {
+      const ranked = scored
+        .map((s) => {
+          const threads = this.threadsOn(s.a.id);
+          const left = Math.max(0, 100 - s.pct);
+          return { ...s, threads, left, share: left / (threads + 1) };
+        })
+        // Stable sort: equal shares keep the user's order.
+        .sort((x, y) => Number(y.pct < threshold) - Number(x.pct < threshold) || y.share - x.share);
+      const best = ranked[0];
+      const others = ranked
+        .slice(1, 4)
+        .map((s) => `${s.a.id} ${Math.round(s.left)}%/${s.threads}`)
+        .join(', ');
+      return {
+        account: best.a,
+        why: `${Math.round(best.left)}% left, ${best.threads} thread(s) on it${others ? `; next: ${others}` : ''}`,
+      };
+    }
     if (strategy === 'drain') {
       const under = scored
         .filter((s) => s.pct < threshold)
@@ -718,8 +794,9 @@ export class AccountPool {
       if (under.length > 0) {
         const cap = this.state.settings.fillMaxInFlight;
         const free = cap > 0 ? under.find((s) => s.busy < cap) : under[0];
-        if (free) return { account: free.a };
-        return { account: [...under].sort((x, y) => x.busy - y.busy)[0].a };
+        if (free) return { account: free.a, why: drainReason(free.drain, threshold, now) };
+        const least = [...under].sort((x, y) => x.busy - y.busy)[0];
+        return { account: least.a, why: `all busy; ${drainReason(least.drain, threshold, now)}` };
       }
     }
     if (strategy === 'fill') {
@@ -730,14 +807,15 @@ export class AccountPool {
         // the threshold is that busy, the least busy one serves.
         const cap = this.state.settings.fillMaxInFlight;
         const free = cap > 0 ? under.find((s) => s.busy < cap) : under[0];
-        if (free) return { account: free.a };
-        return { account: [...under].sort((x, y) => x.busy - y.busy)[0].a };
+        if (free) return { account: free.a, why: `first in order under ${threshold}%, ${Math.round(free.pct)}%` };
+        const least = [...under].sort((x, y) => x.busy - y.busy)[0];
+        return { account: least.a, why: `all busy; least busy, ${Math.round(least.pct)}%` };
       }
     }
     scored.sort(
       (x, y) => x.pct - y.pct || x.reset - y.reset || x.busy - y.busy || x.a.priority - y.a.priority,
     );
-    return { account: scored[0].a };
+    return { account: scored[0].a, why: `least used, ${Math.round(scored[0].pct)}%` };
   }
 
   /**
@@ -753,7 +831,9 @@ export class AccountPool {
     const usage = this.runtime(a.id).usage;
     const pct = relevantPercent(usage, model, now);
     const why =
-      strategy === 'drain'
+      strategy === 'headroom'
+        ? `${Math.round(100 - pct)}% left, ${this.threadsOn(a.id)} thread(s) on it`
+        : strategy === 'drain'
         ? drainReason(drainScore(usage, model, threshold, now), threshold, now)
         : strategy === 'spread'
           ? `least used, ${Math.round(pct)}%`
@@ -806,12 +886,14 @@ function slug(s: string): string {
 }
 
 /**
- * `drain` became the default strategy. A state saved before it says `fill`
- * because `fill` was the default then, not necessarily a choice: it moves to
- * `drain` once, and is marked so that a later `fill` chosen in the panel stays.
+ * Default-strategy migrations, each applied once so that a strategy chosen in
+ * the panel afterwards stays.
+ * - Rev 2: a saved `fill` (the old default) moved to `drain`.
+ * - Rev 3 (2026-10-10, user rule): a new thread starts on the seat with the
+ *   most quota left, so a saved `drain` or `fill` moves to `headroom`.
  */
 function withDrainDefault(s: PoolSettings): PoolSettings {
-  // Rev 2: a "fill" saved before it (the old panel offered fill first) moves to drain once more.
-  if ((s.strategyRev ?? 0) >= 2) return s;
-  return { ...s, strategy: s.strategy === 'fill' ? 'drain' : s.strategy, drainDefaulted: true, strategyRev: 2 };
+  if ((s.strategyRev ?? 0) >= 3) return s;
+  const moved = s.strategy === 'fill' || s.strategy === 'drain' ? 'headroom' : s.strategy;
+  return { ...s, strategy: moved, drainDefaulted: true, strategyRev: 3 };
 }

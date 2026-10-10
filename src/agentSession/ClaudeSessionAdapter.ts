@@ -343,7 +343,7 @@ export class ClaudeSessionAdapter {
       else {
         const seat = seatForResume(pool, sessions, sessionId, this.now(), { crossSeat, model });
         if (seat.account) account = seat.account;
-        else if (seat.code === 'not_found') account = pool.pick({ model, pinned }).account;
+        else if (seat.code === 'not_found') account = pool.pick({ model, pinned, place: { thread: req.conversationId, source: 'cli-session' } }).account;
         else {
           emit({
             type: 'turn_end',
@@ -354,7 +354,7 @@ export class ClaudeSessionAdapter {
         }
       }
     } else {
-      account = pool.pick({ model, pinned }).account;
+      account = pool.pick({ model, pinned, place: { thread: req.conversationId, source: 'cli-session' } }).account;
     }
     if (!account) {
       const why = pool.pick({ model, pinned });
