@@ -8,18 +8,38 @@ inference runs against your subscription quota, exactly like the `claude` CLI.
 ## How it works
 
 - Registers an Alfred provider (`claude-code`, *remote*).
-- Each Alfred turn calls the Agent SDK's `query()` in **pure completion mode**:
+- Each Alfred turn calls the Agent SDK's `query()` in **completion mode**:
   `maxTurns: 1`, every built-in tool listed in `disallowedTools`,
   `permissionMode: 'dontAsk'`, plus a `canUseTool` deny-all callback, and
-  `settingSources: []`. Claude runs **no tools** and never touches your
-  filesystem — it just returns model text.
+  `settingSources: []`. Claude runs **no Claude Code tool** and never touches
+  your filesystem: the only tools it sees are Alfred's, run by Alfred.
   (Coding work with real tools goes through the separate `claude_code_run`
   tool, see *Delegated Claude Code sessions*.)
 - Streams token-by-token (`includePartialMessages`), including extended
   thinking.
-- `capabilities.tools = false` → Alfred falls back to its **prompt-encoded
-  toolset**, so the whole Alfred tool ecosystem still works through this
-  provider (Alfred parses tool calls from the model text itself).
+- **Native tool calls** (`capabilities.tools = true`, setting *Native tool
+  calls*, on by default): Alfred's tools are an in-process MCP server of the
+  SDK (`src/hostTools.ts`), the only tools the CLI may use. The model calls
+  `mcp__alfred__<tool>` natively; the server's handler does not run it, it
+  waits. The provider answers the host with `toolCalls`, the host runs them in
+  its own turn loop (permissions, UI, events), and its next request delivers
+  the results to the waiting handlers: the CLI goes on with the **same turn**.
+  No reply is cut, so no "[Request interrupted by user]" marker and no host
+  note (measured on a 273-call session before: 2.96 transcript messages per
+  call, 130 interrupt markers; now one `tool_use` + one `tool_result`).
+  - A reply's calls are run by the CLI one after the other; the host runs them
+    all before its next request, and each result waits for its handler (by
+    the CLI's `claudecode/toolUseId`).
+  - A message that arrives with the results (a user message sent while the
+    tool ran, a context update) travels with the last result; a call the host
+    never ran (a Stop) gets an error result and the turn goes on.
+  - A changed tool set is announced (`tools/list_changed`) and re-read by the
+    CLI before the results are delivered.
+  - A process waiting for results is kept up to 6 h (not just the cache TTL);
+    if it ends anyway, the resume says the interrupted calls' results follow.
+  - With the setting off, Alfred falls back to its **prompt-encoded toolset**
+    (`<tool_call>` markup parsed from the text, reply cut after the call and
+    explained by a host note, `src/hostCutNote.ts`).
 
 ## Prerequisites — one-time setup
 

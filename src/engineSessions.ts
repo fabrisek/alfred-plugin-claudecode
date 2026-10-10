@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { HostToolBridge } from './hostTools.js';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger, Message } from '@alfred/sdk';
@@ -107,6 +108,13 @@ export type EngineSessionRecord = {
    * kill). No session to continue; the next one is told why it starts over.
    */
   lostReason?: string;
+  /**
+   * The session's last reply called Alfred tools natively (hostTools.ts) and
+   * its turn waits for their results: tool_use ids. A process that ends
+   * meanwhile leaves the calls without a result in the transcript (the CLI
+   * marks them interrupted); the resume says the results follow.
+   */
+  awaitingTools?: string[];
   updatedAt: number;
 };
 
@@ -326,6 +334,11 @@ export class LiveSession {
   costSoFar = 0;
   /** Advisor model the process was launched with (accounts/advisor.ts); undefined = none. */
   advisor: string | undefined;
+  /**
+   * Alfred's tools served to this process (hostTools.ts); undefined = the
+   * process was started without them (text protocol).
+   */
+  bridge: HostToolBridge | undefined;
   readonly iterator: AsyncIterator<unknown>;
   idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -478,7 +491,7 @@ export class EngineSessions {
    * spares the next request a CLI start and a transcript load. Sub-agents
    * too: one waiting on a long tool (a build) is not idle.
    */
-  release(session: LiveSession, _opts: { task?: boolean } = {}): void {
+  release(session: LiveSession, opts: { task?: boolean; holdMs?: number } = {}): void {
     session.busy = false;
     session.lastUsed = Date.now();
     if (session.idleTimer) clearTimeout(session.idleTimer);
@@ -491,9 +504,12 @@ export class EngineSessions {
       this.closeSession(session, 'plugin stopping');
       return;
     }
+    // A turn waiting for the host's tool results is held longer than the
+    // cache: closing it would cut the turn the results belong to.
+    const holdMs = Math.max(this.ttlFor(session.accountId), opts.holdMs ?? 0);
     session.idleTimer = setTimeout(() => {
-      if (!session.busy) this.closeSession(session, 'prompt cache expired');
-    }, this.ttlFor(session.accountId));
+      if (!session.busy) this.closeSession(session, opts.holdMs ? 'tool results never came' : 'prompt cache expired');
+    }, holdMs);
     session.idleTimer.unref?.();
   }
 

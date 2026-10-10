@@ -7,6 +7,7 @@ import type {
   Message,
   ModelDetails,
   ModelInfo,
+  ToolCall,
 } from '@alfred/sdk';
 // Not an OpenAI-compatible backend — the transport here is a child process, not
 // HTTP — but the request-lifetime and no-op-logger halves of the package are
@@ -21,6 +22,7 @@ import { ToolCallCutter } from './toolCallCutter.js';
 import { markerNotes } from './hostCutNote.js';
 import { coerceNativeArgs } from './nativeArgs.js';
 import { contextWindowOf, modelDetailsOf } from './modelContext.js';
+import { errorResult, HOST_SERVER, HostToolBridge, toolResultOf, type HostCall, type HostToolResult } from './hostTools.js';
 import {
   ASSISTANT_SLOT,
   CACHE_TTL_1H,
@@ -83,6 +85,12 @@ export type ClaudeCodeConfig = {
   compactAtTokens?: number;
   /** Optional absolute path to the `claude` binary. Empty = auto-detect. */
   pathToClaude: string;
+  /**
+   * Alfred's tools as native tools of the CLI (hostTools.ts), executed by the
+   * host. False = the text protocol (`<tool_call>` markup cut after the call).
+   * Undefined = true.
+   */
+  nativeTools?: boolean;
   /**
    * Time-to-first-chunk budget for one attempt, in ms.
    *
@@ -220,6 +228,8 @@ type QueryOptions = {
   resumeSessionAt?: string;
   /** Our own spawn (pid file for orphan reaping), see agentSession/processTracker.ts. */
   spawnClaudeCodeProcess?: ReturnType<CliProcessTracker['spawner']>;
+  /** Alfred's tools as an in-process MCP server (hostTools.ts). */
+  mcpServers?: Record<string, unknown>;
 };
 
 // Every built-in Claude Code tool, listed so `disallowedTools` strips them from
@@ -365,17 +375,17 @@ export class ClaudeCodeProvider implements LLMProvider {
   readonly id = 'claude-code';
   readonly displayName = 'Claude (subscription)';
   readonly kind = 'remote' as const;
-  // tools:false on purpose — Claude Code in headless completion mode does not
-  // round-trip Alfred's custom tools as native function calls. Declaring
-  // tools:false makes Alfred fall back to its prompt-encoded toolset, so the
-  // full Alfred tool ecosystem still works through this provider.
+  // tools: Alfred's tools reach the CLI as native tools of an in-process MCP
+  // server whose handlers wait for the host to run them (hostTools.ts). With
+  // `nativeTools: false`, tools:false makes Alfred fall back to its
+  // prompt-encoded toolset (text protocol).
   // vision:true — images travel as base64 image blocks in the user message.
-  readonly capabilities = {
-    tools: false,
-    thinking: true,
-    vision: true,
-    streaming: true,
-    modelManagement: false,
+  readonly capabilities: {
+    tools: boolean;
+    thinking: boolean;
+    vision: boolean;
+    streaming: boolean;
+    modelManagement: boolean;
   };
 
   private readonly log: Logger;
@@ -383,6 +393,13 @@ export class ClaudeCodeProvider implements LLMProvider {
   private readonly dropLoadSource: () => void;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
+    this.capabilities = {
+      tools: opts.config.nativeTools !== false,
+      thinking: true,
+      vision: true,
+      streaming: true,
+      modelManagement: false,
+    };
     this.log = opts.logger ?? noopLogger;
     this.sessions = opts.sessionsDir ? new EngineSessions(opts.sessionsDir, this.log) : null;
     // Threads kept warm on a seat weigh on where the next new thread goes.
@@ -470,7 +487,7 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    const base = parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id).map(
+    const base = parseModels(this.opts.config.modelsRaw, this.opts.config.contextWindow, this.id, this.capabilities.tools).map(
       (m) => withServedModel(m, this.opts.pool.servedModelOf(m.id)),
     );
     const pinned: ModelInfo[] = [];
@@ -714,13 +731,17 @@ export class ClaudeCodeProvider implements LLMProvider {
     const timeoutMs = Deadline.prefillBudgetMs(this.opts.config.requestTimeoutMs, contextTokens);
     const deadline = new Deadline(req.signal, timeoutMs, LABEL);
 
+    // Alfred's tools, as native tools the host runs (hostTools.ts). None when
+    // the host sent no tools, or with the text protocol.
+    const hostTools = this.capabilities.tools ? (req.tools ?? []) : [];
     const options: QueryOptions = {
       model,
       maxTurns: 1,
-      // Text-only: no native tools. Alfred sends its tool protocol as text in
-      // the system message (capabilities.tools === false) and parses the
-      // model's `<tool_call>...</tool_call>` text itself. We must NOT let Claude
-      // Code run its own agentic tools (Bash/Read/Write/...) on the machine.
+      // No Claude Code tool: we must NOT let Claude Code run its own agentic
+      // tools (Bash/Read/Write/...) on the machine. Alfred's own tools are
+      // either native MCP tools whose handlers wait for the host (allowed
+      // below), or a text protocol in the system message that Alfred parses
+      // from the model's `<tool_call>...</tool_call>` text.
       allowedTools: [],
       disallowedTools: BUILTIN_TOOLS,
       // 'dontAsk' hard-denies anything not pre-approved instead of prompting
@@ -734,6 +755,14 @@ export class ClaudeCodeProvider implements LLMProvider {
       env: buildChildEnv(pool, account),
       abortController: controller,
     };
+    if (hostTools.length > 0) {
+      // Every tool of the server, and nothing else, is pre-approved: no
+      // prompt (headless) and no Claude Code tool.
+      options.allowedTools = [`mcp__${HOST_SERVER}`];
+      // A handler waits for the host to run the tool: a delegation can take
+      // hours. All tools in the prompt, never deferred behind a search tool.
+      Object.assign(options.env as Record<string, string>, { MCP_TOOL_TIMEOUT: String(HOST_TOOL_TIMEOUT_MS), ENABLE_TOOL_SEARCH: 'false' });
+    }
     // The system prompt heads the cached prefix and is shared by every session
     // of the same agent; its volatile tail (boot notes, open tasks, runtime
     // line) travels in the first user message instead, as the CLI does with
@@ -778,6 +807,9 @@ export class ClaudeCodeProvider implements LLMProvider {
     let live: LiveSession | undefined;
     let record: EngineSessionRecord | undefined;
     let content = fullContent();
+    // Host results that continue a turn waiting on its tool calls (no new user
+    // message: the CLI goes on with the same turn), see hostTools.ts.
+    let toolResults: Array<{ id: string; result: HostToolResult }> | null = null;
     let sessionMode: 'one-shot' | 'fresh' | 'continue' | 'resume' = 'one-shot';
     let planReason = '';
     // What was on disk for this conversation before this request (a tombstone
@@ -813,7 +845,12 @@ export class ClaudeCodeProvider implements LLMProvider {
           if (plan.foreign > 0) this.log.info('replies written outside the session sent as context', { thread: sessionKey, count: plan.foreign });
           // Same seat and model: the live process serves it. A new effort is
           // applied to it in place; the advisor it was launched with stays.
-          let reusable = !!existing && existing.accountId === account.id && existing.model === model;
+          // A process started without Alfred's tools cannot be given them.
+          let reusable =
+            !!existing &&
+            existing.accountId === account.id &&
+            existing.model === model &&
+            (hostTools.length === 0 || !!existing.bridge);
           if (reusable && existing && existing.effort !== effort) {
             // Held while the CLI applies it: no other request may take it.
             existing.busy = true;
@@ -829,14 +866,39 @@ export class ClaudeCodeProvider implements LLMProvider {
             live = existing;
             sessionMode = 'continue';
             advisorModel = existing.advisor;
+            const bridge = existing.bridge;
+            if (bridge && bridge.setTools(hostTools)) {
+              // Same process, new tool set: the CLI re-reads the list before
+              // the model's next step.
+              const read = await bridge.announceChange();
+              this.log.info('tool set changed on the live session', { thread: sessionKey, tools: hostTools.length, reread: read });
+            }
+            if (bridge?.pending) {
+              // Its turn waits for these results: they go to the waiting
+              // calls, and whatever else is new travels with the last one.
+              toolResults = hostResults(plan.delta, bridge, [...lead]);
+              content = [];
+            }
           } else {
             if (existing) {
               const why =
-                existing.accountId !== account.id ? 'seat changed' : existing.model !== model ? 'model changed' : 'effort changed';
+                existing.accountId !== account.id
+                  ? 'seat changed'
+                  : existing.model !== model
+                    ? 'model changed'
+                    : hostTools.length > 0 && !existing.bridge
+                      ? 'tools added'
+                      : 'effort changed';
               // Same session, resumed by a new process (`--resume`).
               sessions.closeSession(existing, `${why}; the session is resumed`);
             }
             sessionMode = 'resume';
+            if (record.awaitingTools?.length) {
+              // The process that made these calls is gone: the CLI marked
+              // them interrupted in the transcript; their results follow as
+              // text.
+              content = [{ type: 'text', text: LOST_CALLS_NOTE }, ...content];
+            }
           }
         } else {
           if (existing) sessions.close(sessionKey, `new session: ${plan.reason}`);
@@ -887,10 +949,14 @@ export class ClaudeCodeProvider implements LLMProvider {
           });
         }
       }
+      // Each process has its own tool server (one MCP connection per instance).
+      const bridge = hostTools.length > 0 ? new HostToolBridge(hostTools) : undefined;
+      if (bridge) sessionOptions.mcpServers = { [HOST_SERVER]: await bridge.serverConfig() };
       const q = query({ prompt: input, options: sessionOptions }) as unknown as LiveQuery;
       this.opts.advisor?.observe(account.id, q, advisorSettings);
       live = new LiveSession(sessionKey, account.id, model, effort, q, input as PushQueue<unknown>, sessionController);
       live.advisor = advisorModel;
+      live.bridge = bridge;
       sessions.add(live);
     }
     if (live) live.busy = true;
@@ -947,6 +1013,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       thread: sessionKey,
       task: req.session?.task ?? false,
       sentBlocks: content.length,
+      ...(toolResults ? { toolResults: toolResults.length } : {}),
       contextTokens,
       timeoutMs,
       ...(expectedCold ? { expectedCold } : {}),
@@ -976,6 +1043,12 @@ export class ClaudeCodeProvider implements LLMProvider {
     // one SDK `assistant` message per block (same message id), so they are
     // collected until the message ends (`message_stop`), then re-emitted.
     const nativeCalls: Array<{ name: string; input?: unknown }> = [];
+    // Native calls of Alfred's tools (hostTools.ts), for the host to run.
+    const hostCalls: HostCall[] = [];
+    // The reply ended on those calls: the turn waits for their results.
+    let suspended = false;
+    // A one-shot process gets its own tool server too (it is killed after the call).
+    const oneShotBridge = hostTools.length > 0 && !live ? new HostToolBridge(hostTools) : undefined;
     // Usage of the latest API message (`message_start`, completed by
     // `message_delta`): the record of a request stopped before its `result`
     // (re-emitted tool calls, cut replies), and of every persistent-session
@@ -1006,6 +1079,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       return {
         content: assembledContent.trim(),
         thinking: assembledThinking.trim() || undefined,
+        ...(suspended ? { toolCalls: hostCalls.map((c): ToolCall => ({ ...c })) } : {}),
         finishReason,
         // Session and cache facts, under the `MessageUsage` names the UI reads
         // (context meter, cold-cache warning).
@@ -1041,10 +1115,17 @@ export class ClaudeCodeProvider implements LLMProvider {
     pool.begin(account.id);
     let iterator: AsyncIterator<unknown> | undefined;
     try {
-      if (live) {
+      if (live && toolResults) {
+        // The turn goes on: no user message, the waiting calls get their results.
+        for (const r of toolResults) live.bridge?.deliver(r.id, r.result);
+        iterator = live.iterator;
+      } else if (live) {
+        // A stale call from an interrupted turn must not hold a handler.
+        if (live.bridge?.pending) live.bridge.cancel('The turn this call belonged to was stopped.');
         live.input.push(oneUser(content));
         iterator = live.iterator;
       } else {
+        if (oneShotBridge) options.mcpServers = { [HOST_SERVER]: await oneShotBridge.serverConfig() };
         const q = query({ prompt: oneUserMessage(content), options });
         this.opts.advisor?.observe(account.id, q, advisorSettings);
         iterator = q[Symbol.asyncIterator]();
@@ -1150,6 +1231,13 @@ export class ClaudeCodeProvider implements LLMProvider {
               usage = mergeUsage(usage, md.usage);
               stepUsage = { ...stepUsage, ...md.usage };
             }
+          } else if (event.type === 'message_stop' && hostCalls.length > 0) {
+            // The reply ends on Alfred tool calls: the host runs them; the
+            // CLI's handlers wait for the results (hostTools.ts).
+            for (const call of hostCalls) yield { type: 'tool_call', call };
+            finishReason = 'tool_calls';
+            suspended = true;
+            break;
           } else if (event.type === 'message_stop' && nativeCalls.length > 0) {
             const markup = renderNativeCalls(nativeCalls);
             assembledContent += markup;
@@ -1212,7 +1300,18 @@ export class ClaudeCodeProvider implements LLMProvider {
           }
           if (calls.length > 0) {
             deadline.disarmTimeout();
-            nativeCalls.push(...calls.map((c) => ({ name: c.name, input: c.input })));
+            const bridge = live?.bridge ?? oneShotBridge;
+            for (const c of calls) {
+              const alfred = bridge?.alfredName(c.name);
+              const id = (c as { id?: unknown }).id;
+              if (alfred && typeof id === 'string') {
+                hostCalls.push({ id, name: alfred, arguments: (c.input ?? {}) as Record<string, unknown> });
+              } else if (!bridge) {
+                nativeCalls.push({ name: c.name, input: c.input });
+              }
+              // Any other native call with tools served: the CLI answers it
+              // ("no such tool") and the model goes on.
+            }
           }
         } else if (message.type === 'result') {
           gotResult = true;
@@ -1272,6 +1371,23 @@ export class ClaudeCodeProvider implements LLMProvider {
           raw: rawText.slice(0, 4_000),
         });
       }
+      if (hostCalls.length > 0 && !suspended && !gotResult) {
+        // No `message_stop` seen (partial messages off): hand them over now.
+        for (const call of hostCalls) yield { type: 'tool_call', call };
+        finishReason = 'tool_calls';
+        suspended = true;
+      }
+      if (suspended) {
+        if (live?.bridge) live.bridge.expect(hostCalls);
+        else {
+          // One-shot: nothing will continue this process.
+          try {
+            controller.abort();
+          } catch {
+            // already gone
+          }
+        }
+      }
       if (nativeCalls.length > 0 && !cutAfterToolCall) {
         // No `message_stop` seen (partial messages off): emit them now.
         const markup = renderNativeCalls(nativeCalls);
@@ -1305,7 +1421,7 @@ export class ClaudeCodeProvider implements LLMProvider {
             // already gone
           }
         }
-      } else {
+      } else if (!suspended) {
         const rest = cutter.flush();
         if (rest) {
           assembledContent += rest;
@@ -1389,7 +1505,7 @@ export class ClaudeCodeProvider implements LLMProvider {
           // Silent, not broken: the next try resumes the same session at the
           // last reply Alfred kept.
           sessions.closeSession(live, `request failed: ${failed?.detail.slice(0, 120) ?? 'silent'}`);
-        } else if ((failed && !seatFailed) || !gotResult) {
+        } else if ((failed && !seatFailed) || (!gotResult && !suspended)) {
           sessions.closeSession(live, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
           if (record.sessionId && sessionMode !== 'fresh' && (record.failures ?? 0) < 1) {
             // The process went away (crash, kill): its session is resumed once
@@ -1420,6 +1536,8 @@ export class ClaudeCodeProvider implements LLMProvider {
           record.interruptedTail = userStopped;
           record.hostCutTail = hostInterrupted && !userStopped;
           record.lastUuid = replyUuid;
+          if (suspended) record.awaitingTools = hostCalls.map((c) => c.id);
+          else delete record.awaitingTools;
           // The notes went out with this request (hostCutNote.ts).
           record.markersExplained = true;
           delete record.lostReason;
@@ -1427,14 +1545,17 @@ export class ClaudeCodeProvider implements LLMProvider {
           const measured = promptTokensOf(stepUsage);
           if (measured > 0) record.contextTokens = measured;
           sessions.save(record);
-          const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0;
-          if (req.session?.task && (requestAborted || !calledTool || TASK_END_CALL.test(rawText))) {
+          const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0 || hostCalls.length > 0;
+          const endsTask = TASK_END_CALL.test(rawText) || hostCalls.some((c) => TASK_END_TOOLS.has(c.name));
+          if (req.session?.task && (requestAborted || !calledTool || endsTask)) {
             // A sub-agent that answered (or was stopped) has finished its
             // task: nothing will feed this process again. Its record stays,
             // so a later message to that thread resumes the same session.
+            live.bridge?.cancel('The task was over.');
             sessions.closeSession(live, requestAborted ? 'sub-agent stopped' : 'sub-agent finished');
           } else {
-            sessions.release(live, { task: req.session?.task });
+            // A turn waiting for its tool results is kept past the cache TTL.
+            sessions.release(live, { task: req.session?.task, holdMs: suspended ? HOST_TOOL_HOLD_MS : undefined });
           }
         }
       }
@@ -1579,6 +1700,63 @@ class SessionLost extends Error {
  * in any of the call spellings the cutter accepts.
  */
 const TASK_END_CALL = /(?:"name"\s*:\s*"|invoke name="|invoke_)task_(?:complete|blocked)\b/;
+/** Native calls that end a sub-agent's task. */
+const TASK_END_TOOLS = new Set(['task_complete', 'task_blocked']);
+/** MCP call budget of a host tool: a delegation can run for hours. */
+const HOST_TOOL_TIMEOUT_MS = 24 * 60 * 60_000;
+/** A process whose turn waits for host tool results is kept this long (not just the cache TTL). */
+const HOST_TOOL_HOLD_MS = 6 * 60 * 60_000;
+
+/** First content of a resume whose previous process died while its tool calls ran. */
+export const LOST_CALLS_NOTE =
+  '[Host note: the Claude Code process that made your last tool call(s) ended before their results came back, ' +
+  'so they show as interrupted above. The host did run them: their results follow. Continue the task.]';
+
+/**
+ * The host's next request for a turn waiting on tool calls: each waiting call
+ * gets its `tool` message as result (an error when the host sent none: a
+ * Stop, a dropped call), and every other new message — a user message sent
+ * meanwhile, a context update — is appended to the last result as text, so
+ * the model reads it in the same step.
+ */
+export function hostResults(
+  delta: Message[],
+  bridge: { awaiting: ReadonlySet<string> },
+  lead: SdkInputBlock[] = [],
+): Array<{ id: string; result: HostToolResult }> {
+  const ids = [...bridge.awaiting];
+  const byId = new Map<string, Message>();
+  const rest: Message[] = [];
+  for (const m of delta) {
+    if (m.role === 'tool' && m.toolCallId && ids.includes(m.toolCallId) && !byId.has(m.toolCallId)) byId.set(m.toolCallId, m);
+    else if (m.role === 'assistant' && m.toolCalls?.length && m.toolCalls.every((c) => ids.includes(c.id))) continue; // the calls themselves
+    else rest.push(m);
+  }
+  const extraBlocks = [...lead, ...(rest.length > 0 ? buildPrompt(rest).content : [])];
+  const extraText = extraBlocks.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text);
+  const extraImages = extraBlocks
+    .filter((b): b is SdkImageBlock => b.type === 'image')
+    .map((b) => ({ data: b.source.data, mimeType: b.source.media_type }));
+  return ids.map((id, i) => {
+    const last = i === ids.length - 1;
+    const msg = byId.get(id);
+    const dropped: DroppedParts = { images: 0, attachments: 0 };
+    const own = msg ? imageBlocks(msg, dropped).map((b) => ({ data: b.source.data, mimeType: b.source.media_type })) : [];
+    const base = msg ? toolResultOf(msg, own) : errorResult('The host returned no result for this call (the turn was stopped or the call was dropped).');
+    if (!last || (extraText.length === 0 && extraImages.length === 0)) return { id, result: base };
+    return {
+      id,
+      result: {
+        ...base,
+        content: [
+          ...base.content,
+          ...extraText.map((text) => ({ type: 'text' as const, text })),
+          ...extraImages.map((img) => ({ type: 'image' as const, ...img })),
+        ],
+      },
+    };
+  });
+}
 
 /** How long an interrupted turn may take to report its `result`. */
 const INTERRUPT_SETTLE_MS = 15_000;
@@ -1812,7 +1990,7 @@ export function withServedModel(model: ModelInfo, served: string | undefined): M
  *  manifest's `models` default and with {@link ALIAS_DISPLAY}. */
 export const DEFAULT_MODELS = ['opus', 'sonnet', 'haiku', 'fable'];
 
-function parseModels(raw: string, contextWindow: number, providerId: string): ModelInfo[] {
+function parseModels(raw: string, contextWindow: number, providerId: string, tools = false): ModelInfo[] {
   const entries = raw
     .split(',')
     .map((s) => s.trim())
@@ -1834,7 +2012,7 @@ function parseModels(raw: string, contextWindow: number, providerId: string): Mo
       // covers an id modelContext.ts does not know. A flat 200k here made the
       // host believe Opus, Sonnet and Fable had a fifth of their 1M window.
       contextWindow: contextWindowOf(id) ?? (contextWindow > 0 ? contextWindow : 200000),
-      capabilities: { tools: false, thinking: true, vision: true },
+      capabilities: { tools, thinking: true, vision: true },
     });
   }
   return models;

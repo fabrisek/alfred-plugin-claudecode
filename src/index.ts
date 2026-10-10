@@ -63,6 +63,8 @@ function resolveConfig(raw: Record<string, unknown>): ClaudeCodeConfig {
         ? raw.compactAtTokens
         : undefined,
     pathToClaude: String(raw.pathToClaude ?? '').trim(),
+    // Absent = on: Alfred's tools as native tools the host runs (hostTools.ts).
+    nativeTools: raw.nativeTools !== false,
     requestTimeoutMs:
       typeof raw.requestTimeoutMs === 'number' &&
       Number.isFinite(raw.requestTimeoutMs) &&

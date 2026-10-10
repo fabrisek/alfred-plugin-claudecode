@@ -7,13 +7,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts tests/modelContext.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts tests/modelContext.test.ts tests/hostTools.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",
     "@alfred/provider-openai-compat": "*",
     "@alfred/sdk": "*",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.294"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.294",
+    "@modelcontextprotocol/sdk": "^1.32.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -145,6 +146,13 @@
         "min": 1000,
         "step": 1000,
         "group": "Catalog"
+      },
+      "nativeTools": {
+        "type": "boolean",
+        "label": "Native tool calls",
+        "description": "Alfred's tools reach Claude as native tools (an in-process MCP server): the model calls them like any Claude Code tool, Alfred runs them, and the result comes back inside the same turn. Off = the older text protocol, where each reply is cut after its tool call (an interrupt marker and a host note per call). Needs a plugin reload.",
+        "default": true,
+        "group": "Chat"
       },
       "compactAtTokens": {
         "type": "number",
