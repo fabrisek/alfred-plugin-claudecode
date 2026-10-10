@@ -35,6 +35,11 @@ export const CACHE_TTL_1H = 60 * 60_000;
 export const MAX_LIVE_SESSIONS = 8;
 /** A sub-agent's process idle this long is closed (it resumes on its next request). */
 export const TASK_IDLE_MS = 2 * 60_000;
+/**
+ * A plugin unloading (reload, shutdown) lets a busy process finish its reply
+ * instead of killing it mid-answer; one still busy after this is closed.
+ */
+export const DRAIN_MAX_MS = 10 * 60_000;
 /** Records untouched for this long are forgotten (their cache is long gone). */
 const RECORD_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
@@ -68,12 +73,28 @@ export type EngineSessionRecord = {
    */
   interruptedTail?: boolean;
   /**
+   * The session's last reply was cut by the host right after its tool call
+   * (not by the user): the CLI still wrote its interrupt marker, so a
+   * `continue` explains it to the model (see hostCutNote.ts).
+   */
+  hostCutTail?: boolean;
+  /**
    * Transcript entry (CLI uuid) of the session's last reply that Alfred kept:
    * a resume truncates there (`resumeSessionAt`), so whatever a failed or
    * killed request appended after it (its delta, an API error) is dropped and
    * the delta is sent again, once.
    */
   lastUuid?: string;
+  /**
+   * The model was told that the session's interrupt markers come from the
+   * host (hostCutNote.ts). Unset on sessions that predate those notes.
+   */
+  markersExplained?: boolean;
+  /**
+   * Tombstone: the conversation's last process died before its reply (crash,
+   * kill). No session to continue; the next one is told why it starts over.
+   */
+  lostReason?: string;
   updatedAt: number;
 };
 
@@ -267,6 +288,8 @@ export class EngineSessions {
   private readonly records = new Map<string, EngineSessionRecord>();
   /** Prompt-cache TTL last reported per seat; a live process outliving it buys nothing. */
   private readonly ttlBySeat = new Map<string, number>();
+  /** The plugin is unloading: no new process, busy ones drain (see dispose). */
+  private disposed = false;
 
   constructor(
     private readonly dir: string,
@@ -313,6 +336,25 @@ export class EngineSessions {
     }
   }
 
+  /**
+   * The conversation's process died before its reply: drop the session and
+   * leave a tombstone, so the session that replaces it is told why
+   * (hostCutNote.ts) instead of meeting a silent restart.
+   */
+  markLost(key: string, accountId: string, reason: string): void {
+    this.forget(key);
+    this.save({
+      key,
+      sessionId: null,
+      accountId,
+      launchSystem: '',
+      currentSystem: '',
+      history: [],
+      lostReason: reason.slice(0, 200),
+      updatedAt: Date.now(),
+    });
+  }
+
   forget(key: string): void {
     this.records.delete(key);
     try {
@@ -343,6 +385,7 @@ export class EngineSessions {
 
   /** May a new process be started without exceeding the cap (busy ones cannot be closed)? */
   hasRoom(): boolean {
+    if (this.disposed) return false;
     const busy = [...this.live.values()].filter((s) => s.busy && !s.dead).length;
     return busy < this.maxLive;
   }
@@ -361,7 +404,12 @@ export class EngineSessions {
     session.lastUsed = Date.now();
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session.dead) {
-      this.live.delete(session.key);
+      if (this.live.get(session.key) === session) this.live.delete(session.key);
+      return;
+    }
+    if (this.disposed) {
+      // Drained: its reply is out, nothing will feed it again.
+      this.closeSession(session, 'plugin stopping');
       return;
     }
     // A sub-agent between two tool calls comes back within seconds; one that
@@ -383,12 +431,45 @@ export class EngineSessions {
     s.close();
   }
 
+  /**
+   * Close this process. Unlike {@link close}, never touches a newer process
+   * that took the same key since (a late `finally`, a timer of a past request).
+   */
+  closeSession(session: LiveSession, reason: string): void {
+    if (this.live.get(session.key) === session) this.live.delete(session.key);
+    if (!session.dead) this.log.info('closing Claude engine session', { reason, account: session.accountId, thread: session.key });
+    session.close();
+  }
+
+  /** True once the plugin is unloading. */
+  get disposing(): boolean {
+    return this.disposed;
+  }
+
   liveCount(): number {
     return [...this.live.values()].filter((s) => !s.dead).length;
   }
 
+  /**
+   * Plugin unloading (reload, gateway stop). Idle processes are closed now. A
+   * busy one is mid-reply for a conversation: killing it ends that reply with
+   * "process ended before its reply" (what a plugin reload used to do to every
+   * running agent at once), so it finishes its reply first and is closed on
+   * release, or after {@link DRAIN_MAX_MS}. Its record is saved as usual, so
+   * the reloaded plugin resumes the session.
+   */
   dispose(): void {
-    for (const key of [...this.live.keys()]) this.close(key, 'plugin stopping');
+    this.disposed = true;
+    for (const s of [...this.live.values()]) {
+      if (!s.busy || s.dead) {
+        this.closeSession(s, 'plugin stopping');
+        continue;
+      }
+      this.log.info('draining a busy Claude engine session before closing it', { account: s.accountId, thread: s.key });
+      if (s.idleTimer) clearTimeout(s.idleTimer);
+      s.idleTimer = setTimeout(() => this.closeSession(s, 'plugin stopping: reply still running'), DRAIN_MAX_MS);
+      s.idleTimer.unref?.();
+    }
   }
 
   private prune(): void {

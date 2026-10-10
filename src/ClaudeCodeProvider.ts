@@ -17,6 +17,8 @@ import type { RateLimitInfo } from './accounts/usage.js';
 import type { CliProcessTracker } from './agentSession/processTracker.js';
 import { engineThread, isAdvisorRefusal, type AdvisorPolicy } from './accounts/advisor.js';
 import { ToolCallCutter } from './toolCallCutter.js';
+import { markerNotes } from './hostCutNote.js';
+import { coerceNativeArgs } from './nativeArgs.js';
 import {
   ASSISTANT_SLOT,
   cacheTtlOf,
@@ -402,6 +404,10 @@ export class ClaudeCodeProvider implements LLMProvider {
         xhigh: { claudeEffort: 'xhigh' },
         max: { claudeEffort: 'max' },
       },
+      // What a conversation left on `default` ("Auto") runs at: the UI shows
+      // this budget instead of Auto. Display only: the effort itself is
+      // applied in attemptOnce() (`DEFAULT_EFFORT`) and by the session adapter.
+      defaultThinkingMode: DEFAULT_EFFORT,
       // Alfred's own prompt-encoded protocol is Qwen-style `<tool_call>` JSON,
       // and that is the only textual protocol this provider's replies can
       // contain — Claude never emits Hermes XML unprompted.
@@ -541,11 +547,13 @@ export class ClaudeCodeProvider implements LLMProvider {
         return;
       }
       if (!(err instanceof SessionLost)) throw err;
-      this.log.warn('Claude engine session lost before any output; retrying as a one-shot request', {
+      // The failed attempt dropped the session and left a tombstone, so this
+      // retry starts a fresh one and tells the model why (hostCutNote.ts).
+      this.log.warn('Claude engine session lost before any answer text; retrying once on a fresh session', {
         account: account.id,
         detail: err.message.slice(0, 200),
       });
-      yield* this.attemptOnce(req, model, built, account, agent, null);
+      yield* this.attemptOnce(req, model, built, account, agent, sessionKey);
     }
   }
 
@@ -628,7 +636,11 @@ export class ClaudeCodeProvider implements LLMProvider {
     let content = fullContent();
     let sessionMode: 'one-shot' | 'fresh' | 'continue' | 'resume' = 'one-shot';
     let planReason = '';
-    if (sessionKey && sessions && this.opts.cli.native) {
+    // What was on disk for this conversation before this request (a tombstone
+    // when its last process died).
+    const previous = sessionKey && sessions ? sessions.record(sessionKey) : undefined;
+    // An unloading plugin starts no process: it only drains the busy ones.
+    if (sessionKey && sessions && this.opts.cli.native && !sessions.disposing) {
       const existing = sessions.getLive(sessionKey);
       if (!existing?.busy) {
         const plan = planSession(sessions.record(sessionKey), {
@@ -664,6 +676,8 @@ export class ClaudeCodeProvider implements LLMProvider {
             launchSystem: system.stable,
             currentSystem: built.systemPrompt,
             history: [],
+            // A new transcript holds no marker from before the notes.
+            markersExplained: true,
             updatedAt: Date.now(),
           };
           sessionMode = 'fresh';
@@ -676,6 +690,10 @@ export class ClaudeCodeProvider implements LLMProvider {
         }
       }
     }
+    // Interrupt markers and lost processes the model would otherwise read as
+    // the user stopping it (hostCutNote.ts).
+    const notes = markerNotes(sessionMode, record, previous);
+    if (notes.length > 0) content = [...notes.map((text): SdkInputBlock => ({ type: 'text', text })), ...content];
     const persistent = sessionMode !== 'one-shot';
     if (persistent && !live && sessions && record && sessionKey) {
       const sessionController = new AbortController();
@@ -726,11 +744,11 @@ export class ClaudeCodeProvider implements LLMProvider {
         // A CLI that never answers the interrupt would hold the turn (and its
         // parent's Stop) forever: close its process; the record stays.
         stopFallback = setTimeout(() => {
-          if (!stopped.dead) sessions?.close(stopped.key, 'stop: no result after the interrupt');
+          if (!stopped.dead) sessions?.closeSession(stopped, 'stop: no result after the interrupt');
         }, INTERRUPT_SETTLE_MS);
         stopFallback.unref?.();
       } else if (sessions) {
-        sessions.close(live.key, 'no output within the request timeout');
+        sessions.closeSession(live, 'no output within the request timeout');
       }
     };
     if (deadline.signal.aborted) onDeadline();
@@ -785,6 +803,8 @@ export class ClaudeCodeProvider implements LLMProvider {
     const cutter = new ToolCallCutter();
     let rawText = '';
     let cutAfterToolCall = false;
+    // This request interrupted its own CLI turn after a tool call (host cut).
+    let hostInterrupted = false;
     // What the pool records for this attempt; unset = served.
     let failed: { outcome: 'error' | 'switched'; detail: string } | null = null;
     // The seat failed (limit, throttle, auth), not the session.
@@ -837,8 +857,17 @@ export class ClaudeCodeProvider implements LLMProvider {
       for (;;) {
         const step = await iterator.next();
         if (step.done) {
-          if (persistent && !gotResult && !requestAborted) {
-            throw new Error('Claude Code session process ended before its reply');
+          if (persistent && !gotResult) {
+            // Our own timeout closed it: fail like a silent seat (catch below),
+            // never end the turn on an empty reply.
+            if (requestAborted && !deadline.userAborted) {
+              throw new Error(`no output within ${this.opts.config.requestTimeoutMs}ms`);
+            }
+            if (!requestAborted) {
+              throw new Error(
+                `Claude Code session process ended before its reply${sessions?.disposing ? ' (plugin unloading)' : ''}`,
+              );
+            }
           }
           break;
         }
@@ -1047,6 +1076,7 @@ export class ClaudeCodeProvider implements LLMProvider {
         // the CLI rather than paying for it.
         this.log.info('reply ended after its tool call', { account: account.id, model });
         if (live && !gotResult) {
+          hostInterrupted = true;
           // Interrupt the turn but keep the process: the session keeps what
           // was generated up to here, and receives the tool results next.
           gotResult = await this.interruptTurn(
@@ -1103,9 +1133,10 @@ export class ClaudeCodeProvider implements LLMProvider {
       const refused = advisorRefusal(detail);
       if (refused) throw refused;
       const failure = fail(detail);
-      if (persistent && !failure.switchable && assembledContent.length === 0 && !assembledThinking) {
-        // The session's process went away (crash, killed, bad resume): the
-        // caller retries once without it.
+      if (persistent && !failure.switchable && assembledContent.length === 0) {
+        // The session's process went away (crash, killed, bad resume) before
+        // any answer text: the caller retries once on a fresh session. Thinking
+        // already streamed is only re-thought, never shown twice as an answer.
         failed = { outcome: 'switched', detail };
         throw new SessionLost(detail);
       }
@@ -1127,11 +1158,11 @@ export class ClaudeCodeProvider implements LLMProvider {
         if (advisorRefused) {
           // The process goes (it was launched with the advisor), the session
           // stays: the replay without the advisor resumes it at the last reply.
-          sessions.close(live.key, 'advisor refused by the API');
+          sessions.closeSession(live, 'advisor refused by the API');
         } else if (failed && seatFailed && persistent && record.sessionId && (this.opts.crossSeat?.() ?? false)) {
           // The seat is out, not the session: the next seat resumes it at the
           // last reply Alfred kept and sends this request's delta again.
-          sessions.close(live.key, `seat failed: ${failed.detail.slice(0, 120)}`);
+          sessions.closeSession(live, `seat failed: ${failed.detail.slice(0, 120)}`);
         } else if (!failed && userStopped && (!gotResult || !replyUuid)) {
           // Stopped before the CLI settled: the process goes, the session
           // stays. The record still describes what the session held before
@@ -1139,11 +1170,13 @@ export class ClaudeCodeProvider implements LLMProvider {
           // what is new since then, or starts afresh if Alfred's history
           // moved on differently.
           // (Or it settled with nothing of the reply in the transcript.)
-          sessions.close(live.key, 'stopped before the reply settled');
+          sessions.closeSession(live, 'stopped before the reply settled');
         } else if (failed || !gotResult) {
-          // Unknown state: the next request starts a fresh session.
-          sessions.close(live.key, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
-          sessions.forget(live.key);
+          // Unknown state: the next request starts a fresh session. A process
+          // that died leaves a tombstone so that session is told why.
+          sessions.closeSession(live, failed ? `request failed: ${failed.detail.slice(0, 120)}` : 'reply never completed');
+          if (failed && !seatFailed) sessions.markLost(live.key, account.id, failed.detail);
+          else sessions.forget(live.key);
         } else {
           record.sessionId = sessionId ?? record.sessionId;
           record.accountId = account.id;
@@ -1153,14 +1186,18 @@ export class ClaudeCodeProvider implements LLMProvider {
             ASSISTANT_SLOT,
           ];
           record.interruptedTail = userStopped;
+          record.hostCutTail = hostInterrupted && !userStopped;
           record.lastUuid = replyUuid;
+          // The notes went out with this request (hostCutNote.ts).
+          record.markersExplained = true;
+          delete record.lostReason;
           sessions.save(record);
           const calledTool = cutAfterToolCall || nativeCalls.length > 0 || cutter.callCount > 0;
           if (req.session?.task && (requestAborted || !calledTool || TASK_END_CALL.test(rawText))) {
             // A sub-agent that answered (or was stopped) has finished its
             // task: nothing will feed this process again. Its record stays,
             // so a later message to that thread resumes the same session.
-            sessions.close(live.key, requestAborted ? 'sub-agent stopped' : 'sub-agent finished');
+            sessions.closeSession(live, requestAborted ? 'sub-agent stopped' : 'sub-agent finished');
           } else {
             sessions.release(live, { task: req.session?.task });
           }
@@ -1298,7 +1335,7 @@ const INTERRUPT_SETTLE_MS = 15_000;
 /** Native tool calls re-emitted as the `<tool_call>` markup Alfred parses. */
 function renderNativeCalls(calls: Array<{ name: string; input?: unknown }>): string {
   return calls
-    .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: c.input ?? {} })}\n</tool_call>`)
+    .map((c) => `\n<tool_call>\n${JSON.stringify({ name: c.name, arguments: coerceNativeArgs(c.input) })}\n</tool_call>`)
     .join('');
 }
 

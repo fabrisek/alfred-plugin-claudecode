@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts"
+    "test": "node --import tsx --test tests/accounts.test.ts tests/engineSessions.test.ts tests/hostCutNote.test.ts tests/session.test.ts tests/cutter.test.ts tests/claudeEventMap.test.ts tests/agentSession.test.ts tests/sharedSessions.test.ts tests/usageHistory.test.ts tests/capacity.test.ts tests/drain.test.ts tests/pricing.test.ts tests/usagePolicy.test.ts tests/usageRealData.test.ts tests/webview.test.ts tests/processTracker.test.ts tests/advisor.test.ts"
   },
   "dependencies": {
     "@alfred/plugin-kit": "*",

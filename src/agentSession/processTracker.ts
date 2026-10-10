@@ -7,12 +7,15 @@
  * killed only when the live process with that pid has the same image name and
  * started within a few seconds of the recorded spawn — a pid the OS reused for
  * something else (or the user's own `claude` in a terminal) is left alone.
- * Entries of another host process that is still alive (a second gateway on
- * the same data dir) are kept and never killed. Only processes are killed:
- * session records and CLI transcripts are never touched.
+ * Entries of a host process that is still alive are kept and never killed:
+ * a second gateway on the same data dir, or this very gateway, whose previous
+ * activation of the plugin (before a reload) may still be draining a reply
+ * (engineSessions.ts `dispose`). Only processes are killed: session records
+ * and CLI transcripts are never touched.
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { Logger } from '@alfred/sdk';
@@ -23,6 +26,8 @@ export type TrackedProcess = {
   startedAt: number;
   /** Host process (gateway) that spawned it; absent in files written before it existed. */
   owner?: number;
+  /** Tracker (plugin activation) that spawned it, within its host process. */
+  instance?: string;
 };
 
 /** Live process facts used to recognise a recorded child. */
@@ -41,6 +46,8 @@ type SpawnOptions = {
 
 export class CliProcessTracker {
   private live = new Map<number, TrackedProcess>();
+  /** This activation, told apart from an earlier one in the same host process. */
+  private readonly instance = randomUUID();
 
   constructor(
     private readonly file: string,
@@ -72,7 +79,13 @@ export class CliProcessTracker {
       child.stderr?.on('error', () => {});
       const pid = child.pid;
       if (pid !== undefined) {
-        this.live.set(pid, { pid, image: basename(o.command).toLowerCase(), startedAt: this.now(), owner: this.self });
+        this.live.set(pid, {
+          pid,
+          image: basename(o.command).toLowerCase(),
+          startedAt: this.now(),
+          owner: this.self,
+          instance: this.instance,
+        });
         this.save();
         child.once('exit', () => {
           this.live.delete(pid);
@@ -93,7 +106,7 @@ export class CliProcessTracker {
     let killed = 0;
     for (const p of previous) {
       if (this.live.has(p.pid)) continue;
-      if (this.ownedElsewhere(p)) continue;
+      if (this.ownedByLiveHost(p)) continue;
       let facts: Awaited<ReturnType<ProcessProbe>>;
       try {
         facts = await this.probe(p.pid);
@@ -115,9 +128,20 @@ export class CliProcessTracker {
     return killed;
   }
 
-  /** Spawned by another host process that still runs: its child, not an orphan. */
+  /**
+   * Spawned by a host process that still runs (another gateway, or this one
+   * before a plugin reload): its child, not an orphan.
+   */
+  private ownedByLiveHost(p: TrackedProcess): boolean {
+    if (p.owner === undefined) return false;
+    return p.owner === this.self || this.isAlive(p.owner);
+  }
+
+  /** Another tracker's entry that must survive this one's writes. */
   private ownedElsewhere(p: TrackedProcess): boolean {
-    return p.owner !== undefined && p.owner !== this.self && this.isAlive(p.owner);
+    if (!this.ownedByLiveHost(p)) return false;
+    // A same-host entry of an earlier activation only while its process lives.
+    return p.owner !== this.self || (p.instance !== this.instance && this.isAlive(p.pid));
   }
 
   private read(): TrackedProcess[] {

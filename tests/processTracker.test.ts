@@ -54,7 +54,10 @@ describe('CLI process tracker', () => {
       JSON.stringify([
         { pid: 21, image: 'claude.exe', startedAt: t0, owner: 900 }, // other gateway, alive
         { pid: 22, image: 'claude.exe', startedAt: t0, owner: 901 }, // dead gateway: orphan
-        { pid: 23, image: 'claude.exe', startedAt: t0, owner: 1 }, // this process, previous activation
+        // This process, previous activation (before a plugin reload): it may
+        // still be draining a reply, and closes its own children. Never killed;
+        // dropped from the file once its process is gone.
+        { pid: 23, image: 'claude.exe', startedAt: t0, owner: 1 },
       ]),
     );
     const killed: number[] = [];
@@ -69,8 +72,8 @@ describe('CLI process tracker', () => {
       1,
       (pid) => pid === 900,
     );
-    assert.equal(await tracker.reapOrphans(), 2);
-    assert.deepEqual(killed, [22, 23]);
+    assert.equal(await tracker.reapOrphans(), 1);
+    assert.deepEqual(killed, [22]);
     assert.deepEqual(
       JSON.parse(readFileSync(file, 'utf8')).map((p: { pid: number }) => p.pid),
       [21],

@@ -12,12 +12,15 @@ import {
   CACHE_TTL_1H,
   cacheTtlOf,
   EngineSessions,
+  LiveSession,
   messageFingerprint,
+  PushQueue,
   planSession,
   splitVolatileContext,
   systemUpdateNote,
   type EngineSessionRecord,
 } from '../src/engineSessions.js';
+import { HOST_CUT_NOTE } from '../src/hostCutNote.js';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} } as never;
 let dir = '';
@@ -136,8 +139,9 @@ describe('engine sessions: one CLI session per conversation', () => {
     assert.equal(spawn.interrupts, 2, 'cut replies are interrupted, not killed');
     assert.match(spawn.inputs[0][0], /^<system-reminder>[\s\S]*# Dynamic Project Context[\s\S]*9 task\(s\)/);
     assert.equal(spawn.inputs[0][1], 'User:\nlist three times');
-    assert.deepEqual(spawn.inputs[1], ['Tool result (list_dir):\na.txt b.txt']);
-    assert.deepEqual(spawn.inputs[2], ['Tool result (list_dir):\nc.txt']);
+    // A host-cut reply left the CLI's interrupt marker: the note explains it.
+    assert.deepEqual(spawn.inputs[1], [HOST_CUT_NOTE, 'Tool result (list_dir):\na.txt b.txt']);
+    assert.deepEqual(spawn.inputs[2], [HOST_CUT_NOTE, 'Tool result (list_dir):\nc.txt']);
     assert.deepEqual(spawn.inputs[3], ['User:\nagain?']);
     p.dispose();
   });
@@ -532,5 +536,57 @@ describe('engine sessions: planning', () => {
   it('reads the cache TTL from the response usage', () => {
     assert.equal(cacheTtlOf({ cache_creation: { ephemeral_1h_input_tokens: 5, ephemeral_5m_input_tokens: 0 } }), CACHE_TTL_1H);
     assert.equal(cacheTtlOf({ cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 } }), null);
+  });
+});
+
+describe('engine sessions: plugin unload and lost processes', () => {
+  /** A live session over a query that only records whether it was closed. */
+  const liveSession = (key: string) => {
+    const state = { closed: false };
+    const query = {
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<unknown>>(() => {}) }),
+      close: () => {
+        state.closed = true;
+      },
+    };
+    return { session: new LiveSession(key, 'seat', 'opus', null, query, new PushQueue<unknown>(), new AbortController()), state };
+  };
+
+  it('lets a busy process finish its reply on dispose, and closes the idle ones at once', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'u-')), logger);
+    const busy = liveSession('busy|dev|');
+    const idle = liveSession('idle|dev|');
+    sessions.add(busy.session);
+    sessions.add(idle.session);
+    busy.session.busy = true;
+    sessions.dispose();
+    assert.equal(idle.state.closed, true, 'idle: closed now');
+    assert.equal(busy.state.closed, false, 'mid-reply: not killed');
+    assert.equal(sessions.hasRoom(), false, 'an unloading plugin starts no process');
+    sessions.release(busy.session);
+    assert.equal(busy.state.closed, true, 'closed once its reply is out');
+    assert.equal(sessions.liveCount(), 0);
+  });
+
+  it('closes a process by identity, never a newer one under the same key', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'u-')), logger);
+    const old = liveSession('k|dev|');
+    const newer = liveSession('k|dev|');
+    sessions.add(old.session);
+    sessions.add(newer.session);
+    sessions.closeSession(old.session, 'late finally');
+    assert.equal(old.state.closed, true);
+    assert.equal(newer.state.closed, false);
+    assert.equal(sessions.getLive('k|dev|'), newer.session);
+    sessions.dispose();
+  });
+
+  it('leaves a tombstone for a lost process, and the next request starts fresh', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'u-')), logger);
+    sessions.markLost('k|dev|', 'seat', 'Claude Code session process ended before its reply');
+    const rec = sessions.record('k|dev|');
+    assert.equal(rec?.sessionId, null);
+    assert.match(String(rec?.lostReason), /ended before its reply/);
+    assert.equal(planSession(rec, { accountId: 'seat', system: SYSTEM, messages: [{ role: 'user', content: 'x' }] }).kind, 'fresh');
   });
 });

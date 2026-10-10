@@ -238,6 +238,8 @@ its transcript; `tests/probe-usage.mjs` prints the raw usage response (never the
 - Images (`Message.images` / image attachments) are sent as base64 image
   blocks; other attachments are dropped with a log line.
 - Thinking mode maps to the CLI's `--effort` (native CLI only); "off" maps to
-  `low`, adaptive thinking cannot be fully disabled.
+  `low`, adaptive thinking cannot be fully disabled. No mode chosen runs at
+  `high`; the provider declares it (`defaultThinkingMode`) so Alfred's header
+  shows High instead of Auto.
 - Sampling params (temperature, top_p, …) are not exposed: the Agent SDK
   doesn't surface them in headless completion mode.

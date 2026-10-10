@@ -21,12 +21,21 @@
  * cut lands inside an open wrapper, the wrapper is closed so the host's parser
  * sees a well-formed block.
  *
+ * Alfred's close tag only counts inside an open call and outside its JSON
+ * strings ({@link AlfredCallCloseScanner}): a brief quoting the protocol is
+ * not a close. Likewise, an open Alfred call only ends at its own close: a
+ * Claude close tag quoted in its arguments is ignored — unless the Alfred
+ * opener itself sits inside an unclosed Claude block (a native call quoting
+ * Alfred's protocol), which keeps its Claude close.
+ *
  * A model can also loop instead of stopping: the same call written hundreds of
  * times, or `<function_calls>` openers with nothing in them (seen: 100 kB of
  * it, until the user pressed Stop). So the reply also ends on an empty
  * wrapper opened twice in a row, on the third copy of one call, and after
  * {@link MAX_CALLS_PER_REPLY} calls.
  */
+
+import { AlfredCallCloseScanner, CALL_CLOSE } from './alfredCallCloseScanner.js';
 
 const NS = ['antml', ':'].join('');
 const PREFIXES = ['', NS];
@@ -35,6 +44,8 @@ const CLOSES = [
   '</tool_call>',
   ...PREFIXES.flatMap((p) => [`</${p}invoke>`, `</${p}function_calls>`]),
 ];
+/** Closes found by plain search; Alfred's own is left to the scanner. */
+const BLOCK_CLOSES = CLOSES.filter((c) => c !== CALL_CLOSE);
 /** Close of the named spelling, `</invoke_grep>`. */
 const NAMED_CLOSE = /<\/(?:antml:)?invoke_[A-Za-z0-9_.:-]+\s*>/g;
 /** What may follow a closed call without ending the reply. */
@@ -52,6 +63,8 @@ const WRAPPER_CLOSE = PREFIXES.map((p) => `</${p}function_calls>`);
 const MAX_MARKER = Math.max(...CLOSES.map((c) => c.length));
 /** Longest named close we wait for when a delta splits it. */
 const MAX_NAMED_CLOSE = 80;
+/** Start of a Claude-syntax block: `<invoke `, `<invoke_x>`, `<function_calls>`. */
+const CLAUDE_OPEN = /<(?:antml:)?(?:invoke[\s_]|function_calls>)/;
 /** A wrapper opened again with nothing in between: the model is looping. */
 const EMPTY_WRAPPER_REPEAT = /<(?:antml:)?function_calls>\s*(?=<(?:antml:)?function_calls>)/;
 
@@ -88,6 +101,7 @@ export class ToolCallCutter {
    * refused (a loop), and half of it must not have reached the host by then.
    */
   private holding = false;
+  private readonly alfredCalls = new AlfredCallCloseScanner();
 
   /** Tool calls closed so far in this reply (0 = a plain answer). */
   get callCount(): number {
@@ -184,21 +198,38 @@ export class ToolCallCutter {
   }
 
   private findClose(): number | null {
-    let best: number | null = null;
-    for (const marker of CLOSES) {
+    let best = this.alfredCalls.findClose(this.all, this.lastCloseEnd);
+    const mask = this.alfredCallStart();
+    // Only the first match of each marker matters: if it is masked, every
+    // later one is too (masking runs from `mask` to the Alfred close, if any).
+    for (const marker of BLOCK_CLOSES) {
       const at = this.all.indexOf(marker, this.scanFrom);
-      if (at >= 0) {
+      if (at >= 0 && at < mask) {
         const end = at + marker.length;
         if (best === null || end < best) best = end;
       }
     }
     NAMED_CLOSE.lastIndex = this.scanFrom;
     const named = NAMED_CLOSE.exec(this.all);
-    if (named) {
+    if (named && named.index < mask) {
       const end = named.index + named[0].length;
       if (best === null || end < best) best = end;
     }
     return best;
+  }
+
+  /**
+   * Offset from which Claude close tags belong to an open Alfred call and are
+   * ignored; Infinity when none is open, or when its opener is itself inside
+   * an unclosed Claude block. Call after `alfredCalls.findClose`.
+   */
+  private alfredCallStart(): number {
+    const open = this.alfredCalls.openedAt;
+    if (open === null) return Infinity;
+    // Any Claude opener since the last close is still unclosed (its close
+    // would have moved `lastCloseEnd`).
+    if (CLAUDE_OPEN.test(this.all.slice(this.lastCloseEnd, open))) return Infinity;
+    return open;
   }
 
   /** Offset of a wrapper re-opened with nothing inside, if any. */
