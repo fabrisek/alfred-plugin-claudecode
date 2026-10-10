@@ -672,7 +672,7 @@ function seatRows(s) {
     var today = todayOf(a.id);
     var money = '<div class="money"><span class="num" title="' + esc(sp && sp.fiveFrom ? 'API-equivalent value of this seat\\x27s current 5h window, from ' + fmtClock(sp.fiveFrom) + ' (reset minus 5h) to now' : 'No 5h window known') + '">'
       + (sp && sp.fiveFrom ? fmtUsd(sp.fiveUsd) : '\\u2014') + '</span>'
-      + '<span class="num muted small" title="' + esc('Today, ' + TZ + ', since 00:00' + (today ? '\\n' + breakdownLines([today[0], today[1], today[2], today[3]], [today[4], today[5], today[6], today[7]]).join('\\n') : '')) + '">'
+      + '<span class="num muted small" title="' + esc('Today, ' + TZ + ', since 00:00' + (today ? '\\n' + cellBreakdown(today).join('\\n') : '')) + '">'
       + (today ? fmtUsd(usdOf(today)) : '$0') + ' today</span></div>';
     var html = '<tr class="' + (st.state === 'in use' ? 'cur' : '') + (isNext ? ' next' : '') + (a.enabled ? '' : ' off') + '">'
       + '<td class="ord c-narrow" title="' + (manual ? 'Seat order: breaks ties, and the order of use for fill' : 'Sorted by reset: switch to the manual order to move seats') + '"><span class="pos">' + (i + 1) + '</span>'
@@ -1087,27 +1087,44 @@ function weekOf(d) {
   dt.setDate(dt.getDate() - (dt.getDay() + 6) % 7);
   return dayKey(dt);
 }
-var CELL = 15;
+var CELL = 23;
 function blankCell() { var c = []; for (var i = 0; i < CELL; i++) c.push(0); return c; }
 function addCell(a, b) { for (var i = 0; i < CELL; i++) a[i] += (b && b[i]) || 0; return a; }
 // Cell: 0-3 tokens (input, cache write, cache read, output), 4-7 their API-equiv USD, 8 requests,
-// 9 reads at the plain input price, 10 writes at the plain input price, 11 1h-write tokens, 12 their USD.
+// 9 reads at the plain input price, 10 writes at the plain input price, 11 1h-write tokens, 12 their USD,
+// 13-14 advisor tokens and USD (already in 0-7), 15-18 / 19-22 the advisor's share of 0-3 / 4-7.
 function val(c, i) { return uMetric === 'cost' ? c[4 + i] : c[i]; }
 function total(c) { return val(c, 0) + val(c, 1) + val(c, 2) + val(c, 3); }
 function fmtVal(v) { return uMetric === 'cost' ? fmtUsd(v) : fmtTokens(v); }
 function sumRows(rows) { var t = blankCell(); (rows || []).forEach(function (c) { addCell(t, c); }); return t; }
 function tokOf(c) { return c[0] + c[1] + c[2] + c[3]; }
 function usdOf(c) { return c[4] + c[5] + c[6] + c[7]; }
+// A kind of token of the served models only: the advisor (another model, another price) apart.
+function mainTok(c, i) { return c[i] - (c[15 + i] || 0); }
+function mainUsd(c, i) { return c[4 + i] - (c[19 + i] || 0); }
+// Breakdown of a cell: the served models' four kinds, then the advisor at its own price, then the total.
+function cellBreakdown(c) {
+  var tt = tokOf(c);
+  var tu = usdOf(c);
+  var out = [];
+  for (var i = 0; i < 4; i++) {
+    var tk = mainTok(c, i);
+    var us = mainUsd(c, i);
+    out.push(TYPE_NAMES[i] + ': ' + fmtTokens(tk) + ' tok (' + pct(tk, tt) + ') \\u00b7 ' + fmtUsd(us) + ' (' + pct(us, tu) + ')');
+  }
+  if (c[13] > 0) out.push('Advisor (Fable): ' + fmtTokens(c[13]) + ' tok (' + pct(c[13], tt) + ') \\u00b7 ' + fmtUsd(c[14]) + ' (' + pct(c[14], tu) + '), in ' + fmtTokens(c[15]) + ' \\u00b7 out ' + fmtTokens(c[18]));
+  out.push('Total: ' + fmtTokens(tt) + ' tok \\u00b7 ' + fmtUsd(tu) + ' API-equiv');
+  return out;
+}
 function cacheRatio(c) { return c[1] > 0 ? c[2] / c[1] : null; }
 function fmtRatio(r) { return r == null ? '\\u2014' : (r >= 10 ? Math.round(r) : r.toFixed(1)) + '\\u00d7'; }
 function hitRate(c) { return pct(c[2], c[0] + c[1] + c[2]); }
 // What the cache did: reads saved (vs plain input) minus the write premium (vs plain input).
 function cacheNet(c) { var saved = c[9] - c[6]; var premium = c[5] - c[10]; return { saved: saved, premium: premium, net: saved - premium }; }
 function cellLines(head, c) {
-  var lines = [head].concat(breakdownLines([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]]));
+  var lines = [head].concat(cellBreakdown(c));
   var n = cacheNet(c);
   lines.push('Cache: ' + (n.net >= 0 ? 'saved ' : 'cost ') + fmtUsd(Math.abs(n.net)) + ' net (reads saved ' + fmtUsd(n.saved) + ', write premium ' + fmtUsd(n.premium) + ')');
-  if (c[13] > 0) lines.push('of which Advisor (Fable): ' + fmtTokens(c[13]) + ' tok \\u00b7 ' + fmtUsd(c[14]));
   lines.push(c[8] + ' requests');
   return lines.join('\\n');
 }
@@ -1278,11 +1295,11 @@ function stripHtml(c, month, plans) {
   var n = cacheNet(c);
   var w1 = c[11];
   var parts = [0, 1, 2, 3].map(function (i) {
-    var title = TYPE_NAMES[i] + ': ' + fmtTokens(c[i]) + ' tok (' + pct(c[i], tt) + ') \\u00b7 ' + fmtUsd(c[4 + i]) + ' (' + pct(c[4 + i], tu) + ')'
+    var title = TYPE_NAMES[i] + ': ' + fmtTokens(mainTok(c, i)) + ' tok (' + pct(mainTok(c, i), tt) + ') \\u00b7 ' + fmtUsd(mainUsd(c, i)) + ' (' + pct(mainUsd(c, i), tu) + ')'
       + (i === 1 && w1 > 0 ? '\\n5m ' + fmtTokens(c[1] - w1) + ' \\u00b7 1h ' + fmtTokens(w1) + ' (' + fmtUsd(c[12]) + ')' : '');
-    return '<span class="it" title="' + esc(title) + '"><i class="sw t' + i + '"></i>' + TYPE_NAMES[i] + ' <b>' + fmtUsd(c[4 + i]) + '</b></span>';
-  }).join('');
-  return '<span class="it" data-tok="' + tt + '" data-usd="' + tu + '" title="' + esc(breakdownLines([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]]).join('\\n')) + '"><span class="k">API</span><span class="big">' + fmtUsd(tu) + '</span></span>'
+    return '<span class="it" title="' + esc(title) + '"><i class="sw t' + i + '"></i>' + TYPE_NAMES[i] + ' <b>' + fmtUsd(mainUsd(c, i)) + '</b></span>';
+  }).join('') + (c[13] > 0 ? '<span class="it" title="' + esc('Fable advising the model, at the Fable price: ' + fmtTokens(c[13]) + ' tok (in ' + fmtTokens(c[15]) + ', out ' + fmtTokens(c[18]) + ')') + '">Advisor <b>' + fmtUsd(c[14]) + '</b></span>' : '');
+  return '<span class="it" data-tok="' + tt + '" data-usd="' + tu + '" title="' + esc(cellBreakdown(c).join('\\n')) + '"><span class="k">API</span><span class="big">' + fmtUsd(tu) + '</span></span>'
     + '<span class="parts">' + parts + '</span>'
     + '<span class="it"><span class="k">tok</span>' + fmtTokens(tt) + '</span>'
     + '<span class="it" title="Cache read tokens per cache write token; hit = share of the prompt read from cache"><span class="k">cache r/w</span>' + fmtRatio(cacheRatio(c)) + ' <span class="muted">' + hitRate(c) + '</span></span>'
@@ -1327,18 +1344,18 @@ function chartSize() {
 function costView(c) {
   var tu = usdOf(c);
   var tt = tokOf(c);
-  var max = Math.max(c[4], c[5], c[6], c[7]) || 1;
+  var max = Math.max(mainUsd(c, 0), mainUsd(c, 1), mainUsd(c, 2), mainUsd(c, 3), c[14]) || 1;
   var n = cacheNet(c);
   var w1 = c[11];
   var rows = [0, 1, 2, 3].map(function (i) {
     var label = TYPE_NAMES[i] + (i === 1 && w1 > 0 ? ' (5m ' + fmtTokens(c[1] - w1) + ' \\u00b7 1h ' + fmtTokens(w1) + ')' : '');
     return '<span><i class="sw t' + i + '"></i>' + esc(label) + '</span>'
-      + '<span><span class="cb t' + i + '" style="display:block;width:' + Math.max(1, Math.round(100 * c[4 + i] / max)) + '%"></span></span>'
-      + '<span class="r">' + fmtTokens(c[i]) + ' <span class="muted">' + pct(c[i], tt) + '</span></span>'
-      + '<span class="r"><b>' + fmtUsd(c[4 + i]) + '</b></span><span class="r muted">' + pct(c[4 + i], tu) + '</span>';
+      + '<span><span class="cb t' + i + '" style="display:block;width:' + Math.max(1, Math.round(100 * mainUsd(c, i) / max)) + '%"></span></span>'
+      + '<span class="r">' + fmtTokens(mainTok(c, i)) + ' <span class="muted">' + pct(mainTok(c, i), tt) + '</span></span>'
+      + '<span class="r"><b>' + fmtUsd(mainUsd(c, i)) + '</b></span><span class="r muted">' + pct(mainUsd(c, i), tu) + '</span>';
   }).join('');
   return '<div class="costs">' + rows
-    + (c[13] > 0 ? '<span title="Fable advising the model: its own tokens, at the Fable 5.1 price, already counted in the four lines above">of which Advisor (Fable)</span><span></span><span class="r">' + fmtTokens(c[13]) + '</span><span class="r">' + fmtUsd(c[14]) + '</span><span class="r muted">' + pct(c[14], tu) + '</span>' : '')
+    + (c[13] > 0 ? '<span title="Fable advising the model: its own calls (in ' + fmtTokens(c[15]) + ', out ' + fmtTokens(c[18]) + '), at the Fable price">Advisor (Fable)</span><span></span><span class="r">' + fmtTokens(c[13]) + ' <span class="muted">' + pct(c[13], tt) + '</span></span><span class="r"><b>' + fmtUsd(c[14]) + '</b></span><span class="r muted">' + pct(c[14], tu) + '</span>' : '')
     + '<span class="sep"></span>'
     + '<span><b>Total</b></span><span></span><span class="r">' + fmtTokens(tt) + '</span><span class="r"><b>' + fmtUsd(tu) + '</b></span><span></span>'
     + '<span title="What the cache reads would have cost as plain input, minus what they cost">Cache reads saved</span><span></span><span class="r muted">r/w ' + fmtRatio(cacheRatio(c)) + '</span><span class="r pos-v">+' + fmtUsd(n.saved) + '</span><span></span>'
@@ -1446,6 +1463,11 @@ function cumulativeLines(gr, accs, ocols, size) {
   });
 }
 
+// History rows that are no seat of the list (tokens before tracking): counted, never drawn.
+function unseatedIds(u, accs) {
+  return Object.keys(u.daily || {}).filter(function (id) { return !accs.some(function (a) { return a.id === id; }); });
+}
+
 function renderUsage() {
   var u = usage;
   if (!u) return;
@@ -1489,14 +1511,19 @@ function renderUsage() {
     (u.daily[a.id] || []).forEach(function (c, i) { if (u.days[i] >= u.monthStart) addCell(month, c); });
     if (u.plans && u.plans[a.id]) plans += u.plans[a.id].monthlyUsd;
   });
+  // Tokens no transcript ties to a seat: not drawn as a series, still in the totals of all seats.
+  var unseated = unseatedIds(u, accs);
+  if (sel === 'all') unseated.forEach(function (id) { (u.daily[id] || []).forEach(function (c, i) { if (u.days[i] >= u.monthStart) addCell(month, c); }); });
 
   var size = chartSize();
   var sum = blankCell();
   var html = '';
   var legend = '';
   if (uView === 'overview' || uView === 'byseat') {
-    var gr = overviewSeries(u, accs, pd, daily);
+    unseated.forEach(function (id) { daily[id] = pd.cut(u.daily[id]); });
+    var gr = overviewSeries(u, accs.concat(unseated.map(function (id) { return { id: id }; })), pd, daily);
     accs.forEach(function (a) { gr.rows[a.id].forEach(function (c) { addCell(sum, c); }); });
+    unseated.forEach(function (id) { gr.rows[id].forEach(function (c) { addCell(sum, c); }); });
     if (uView === 'overview') {
       var ocols = gr.labels.map(function (d, i) {
         var segs = [];
@@ -1507,10 +1534,11 @@ function renderUsage() {
           addCell(tot, c);
           segs.push({ v: total(c), cls: accClass(a.id) });
           if (tokOf(c) > 0) {
-            lines.push(a.label + ': ' + fmtUsd(usdOf(c)) + ' \\u00b7 ' + fmtTokens(tokOf(c)) + ' tok (in ' + fmtUsd(c[4]) + ', cache write ' + fmtUsd(c[5])
-              + ', cache read ' + fmtUsd(c[6]) + ', out ' + fmtUsd(c[7]) + ')');
+            lines.push(a.label + ': ' + fmtUsd(usdOf(c)) + ' \\u00b7 ' + fmtTokens(tokOf(c)) + ' tok (in ' + fmtUsd(mainUsd(c, 0)) + ', cache write ' + fmtUsd(mainUsd(c, 1))
+              + ', cache read ' + fmtUsd(mainUsd(c, 2)) + ', out ' + fmtUsd(mainUsd(c, 3)) + (c[14] > 0 ? ', advisor ' + fmtUsd(c[14]) : '') + ')');
           }
         });
+        unseated.forEach(function (id) { addCell(tot, gr.rows[id][i]); });
         return { label: gr.label(d, i), title: cellLines(lines.join('\\n'), tot), segs: segs, raw: [tokOf(tot), usdOf(tot)] };
       });
       if (uChart === 'lines') {

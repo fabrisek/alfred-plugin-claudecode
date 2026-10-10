@@ -667,7 +667,8 @@ describe('Claude panel usage zone', () => {
     await page.type(page.$('usePeriod'), '0');
     assert.equal(hits(page), 27);
     assert.equal(page.doc.querySelectorAll('#useChart svg').length, 1, 'one chart');
-    assert.match(page.$('useLegend')!.textContent, /A.*B.*unattributed \(before tracking\)/);
+    assert.match(page.$('useLegend')!.textContent, /A.*B/);
+    assert.doesNotMatch(page.$('useLegend')!.textContent, /unattributed/, 'tokens without a seat are no series');
     const strip = page.$('useStrip')!.textContent.replace(/\s+/g, ' ');
     assert.match(strip, /Input/);
     assert.match(strip, /Cache write/);
@@ -677,7 +678,7 @@ describe('Claude panel usage zone', () => {
     assert.match(strip, /saved|cache costs/);
     assert.match(strip, /month/);
     await page.click(btn(page, 'uview', 'byseat'));
-    assert.equal(page.doc.querySelectorAll('#useChart button.mult').length, 3, 'A, B and unknown');
+    assert.equal(page.doc.querySelectorAll('#useChart button.mult').length, 2, 'A and B, no seatless series');
     const multA = btn(page, 'usel', 'a')!;
     assert.match(multA.getAttribute('title')!, /Max 20x/);
     assert.match(multA.getAttribute('title')!, /Cache read: 200\.0k tok/);

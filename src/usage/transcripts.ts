@@ -46,7 +46,7 @@ export function agentOfCwd(cwd: string | undefined): string {
 }
 
 /** The usage vector of one transcript line, or null when it carries none. */
-export type ParsedLine = { id: string; at: number; model: string; cwd?: string; v: Vec; ttlKnown: boolean; advisor: Array<{ model: string; v: Vec }> };
+export type ParsedLine = { id: string; at: number; model: string; cwd?: string; v: Vec; ttlKnown: boolean; fast?: boolean; advisor: Array<{ model: string; v: Vec }> };
 
 export function parseLine(line: string): ParsedLine | null {
   if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
@@ -64,6 +64,8 @@ export function parseLine(line: string): ParsedLine | null {
         cache_read_input_tokens?: number;
         cache_creation_input_tokens?: number;
         cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
+        /** `fast` in fast mode (priced apart), else `standard`. */
+        speed?: string;
         iterations?: Array<{ type?: string; model?: string; input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } }>;
       };
     };
@@ -102,7 +104,7 @@ export function parseLine(line: string): ParsedLine | null {
     const av: Vec = [0, n(it.input_tokens), Math.max(0, cw - (Number.isFinite(a1) ? a1 : 0)), Number.isFinite(a1) ? a1 : 0, n(it.cache_read_input_tokens), n(it.output_tokens)];
     if (av[1] + av[2] + av[3] + av[4] + av[5] > 0) advisor.push({ model: it.model, v: av });
   }
-  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v, ttlKnown: !!u.cache_creation || write === 0, advisor };
+  return { id: j.message?.id || j.requestId || `${at}`, at, model, cwd: j.cwd, v, ttlKnown: !!u.cache_creation || write === 0, fast: u.speed === 'fast', advisor };
 }
 
 /** Message ids remembered per file: a response is written once per content block. */
@@ -417,7 +419,7 @@ export class TranscriptScanner {
         ids[p.id] = [p.v[1], p.v[2], p.v[3], p.v[4], p.v[5]];
       }
       // A length-priced model is stored per price band (usage/pricing.ts).
-      const model = pricedModel(p.model, p.v[1] + p.v[2] + p.v[3] + p.v[4]);
+      const model = pricedModel(p.model, p.v[1] + p.v[2] + p.v[3] + p.v[4], p.fast);
       this.opts.store.add(p.at, account, model, agentOfCwd(p.cwd), v);
       // Advisor iterations, once per response (their growth on a repeated line).
       p.advisor.forEach((ad, k) => {

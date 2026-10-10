@@ -7,7 +7,7 @@
  */
 
 /** When the tables below were checked against the sources named next to them. */
-export const PRICES_VERIFIED = '2026-10-08';
+export const PRICES_VERIFIED = '2026-10-10';
 
 /**
  * USD per million tokens, Anthropic first-party API, global routing, standard
@@ -46,26 +46,82 @@ const TABLE: Array<[string, Price]> = [
 /** Models priced by prompt length: the long-prompt rate applies above this many prompt tokens. */
 export const LONG_PROMPT: Record<string, number> = { 'claude-haiku-5-5': 100_000 };
 
+/**
+ * Fast mode (`usage.speed: "fast"`, research preview): its own input and
+ * output rates; the prompt caching multipliers of the model apply on top
+ * (same source, "Fast mode pricing").
+ */
+const FAST: Array<[string, number, number]> = [
+  ['claude-opus-5-5', 8, 40],
+  ['claude-opus-5', 10, 50],
+  ['claude-opus-4-8', 10, 50],
+];
+
+/**
+ * What the CLI's aliases serve (`opus`, `fable`...): the model ids its
+ * transcripts report for them. Only a fallback: the served id, when known,
+ * always wins.
+ */
+export const ALIASES: Record<string, string> = {
+  opus: 'claude-opus-5-5',
+  fable: 'claude-fable-5-1',
+  mythos: 'claude-mythos-5-1',
+  sonnet: 'claude-sonnet-5',
+  haiku: 'claude-haiku-4-5',
+};
+
 /** An id with no list price is worth $0 here and reported as unpriced, never guessed. */
 const UNPRICED: Price = { input: 0, write5m: 0, write1h: 0, cacheRead: 0, output: 0 };
 
 /**
+ * Id of the model as priced: lower case, no context-window suffix
+ * (`[1m]`: no long-context surcharge on these models), aliases resolved.
+ * Tags (`@long`, `@fast`, `@advisor`) are kept.
+ */
+export function canonicalModel(model: string): string {
+  const [head, ...tags] = model.toLowerCase().trim().split('@');
+  let id = head.replace(/\[[^\]]*\]$/, '').trim();
+  id = ALIASES[id] ?? id;
+  return [id, ...tags].join('@');
+}
+
+/**
  * Price of the model actually served. Dated ids (`claude-opus-4-5-20251101`,
  * `claude-haiku-4-5-20251001`) match their family by prefix; the table is
- * ordered so that the most specific prefix wins.
+ * ordered so that the most specific prefix wins. `@fast` is the fast-mode
+ * rate, `@long` the long-prompt band, `@advisor` changes nothing (an advisor
+ * iteration is billed at its own model's rate).
  */
 export function priceOf(model: string): { price: Price; known: boolean; family: string | null } {
-  const m = model.toLowerCase();
-  for (const [prefix, price] of TABLE) if (m.startsWith(prefix)) return { price, known: true, family: prefix };
+  const [id, ...tags] = canonicalModel(model).split('@');
+  const long = tags.includes('long');
+  for (const [prefix, base] of TABLE) {
+    const isLong = prefix.endsWith('@long');
+    if (isLong !== long && isLong) continue;
+    const fam = isLong ? prefix.slice(0, -5) : prefix;
+    if (!id.startsWith(fam)) continue;
+    if (tags.includes('fast')) {
+      const f = FAST.find(([pre]) => id.startsWith(pre));
+      if (f) {
+        const k = f[1] / base.input;
+        return { price: { input: f[1], write5m: base.write5m * k, write1h: base.write1h * k, cacheRead: base.cacheRead * k, output: f[2] }, known: true, family: fam };
+      }
+    }
+    return { price: base, known: true, family: fam };
+  }
   return { price: UNPRICED, known: false, family: null };
 }
 
-/** Model id as stored: a long-prompt request of a length-priced model gets `@long`. */
-export function pricedModel(model: string, promptTokens: number): string {
+/**
+ * Model id as stored: a long-prompt request of a length-priced model gets
+ * `@long`, a fast-mode request `@fast`.
+ */
+export function pricedModel(model: string, promptTokens: number, fast = false): string {
+  let out = model;
   for (const [prefix, limit] of Object.entries(LONG_PROMPT)) {
-    if (model.startsWith(prefix) && promptTokens > limit) return model + '@long';
+    if (model.startsWith(prefix) && promptTokens > limit) out += '@long';
   }
-  return model;
+  return fast ? out + '@fast' : out;
 }
 
 /** [requests, input, cacheWrite5m, cacheWrite1h, cacheRead, output] */

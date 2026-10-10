@@ -74,7 +74,7 @@ describe('pricing, by hand', () => {
   it('never prices an unknown model as something else', () => {
     assert.equal(priceOf('claude-nova-9').known, false);
     assert.equal(costOf('claude-nova-9', [1, 1e6, 1e6, 1e6, 1e6, 1e6]), 0);
-    assert.equal(priceTokens('opus', [1, 2, 3, 4]), undefined, 'an alias is not a served model');
+    assert.deepEqual(priceTokens('opus', [1e6, 1e6, 1e6, 1e6]), [4, 8, 0.2, 20], 'an alias is priced as the model it serves');
     assert.equal(parseLine(JSON.stringify({ type: 'assistant', timestamp: '2026-10-08T18:00:00Z', message: { model: '<synthetic>', usage: { output_tokens: 5 } } })), null, '<synthetic> is not counted');
   });
 

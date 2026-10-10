@@ -103,7 +103,13 @@ describe('usage history on the real data', { skip: !HAVE && 'no state/usage-hist
             close(sum(nums('#useChart g.col[data-tok]', 'data-usd')), Number(strip().getAttribute('data-usd')), `${where}: strip $ = sum of the bars`);
           }
           if (v === 'byseat') {
-            close(sum(nums('#useChart button.mult', 'data-tok')), Number(strip().getAttribute('data-tok')), `${where}: seats add up to the total`);
+            // Tokens without a seat are no series but stay in the total.
+            const seats = sum(nums('#useChart button.mult', 'data-tok'));
+            const all = Number(strip().getAttribute('data-tok'));
+            const seatless = Object.entries(view.daily)
+              .filter(([id]) => !view.accounts.some((a) => a.id === id))
+              .reduce((s, [, rows]) => s + rows.reduce((t, c) => t + c[0] + c[1] + c[2] + c[3], 0), 0);
+            assert.ok(seats <= all + 1e-6 && all - seats <= seatless + 1e-6, `${where}: seats + seatless add up to the total (${seats} + <=${seatless} vs ${all})`);
           }
           // Bars stay inside the chart.
           const svg = page.doc.querySelector('#useChart svg');

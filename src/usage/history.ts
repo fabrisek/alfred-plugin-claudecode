@@ -74,9 +74,10 @@ function dayStart(day: string): number {
  * 4..7 the API-equivalent USD of the same four; 8 requests;
  * 9 USD the cache reads would have cost as plain input; 10 USD the cache
  * writes would have cost as plain input; 11 cache write 1h tokens; 12 its USD;
- * 13 advisor tokens (Fable advising, already in 0..3), 14 their USD (already in 4..7).
+ * 13 advisor tokens (Fable advising, already in 0..3), 14 their USD (already in 4..7);
+ * 15..18 the advisor's share of 0..3 (tokens), 19..22 its share of 4..7 (USD).
  */
-export const CELL_LEN = 15;
+export const CELL_LEN = 23;
 
 export function addCell(model: string, v: Vec, into: number[]): void {
   const { price: q } = priceOf(model);
@@ -96,6 +97,14 @@ export function addCell(model: string, v: Vec, into: number[]): void {
   if (model.endsWith('@advisor')) {
     into[13] += v[1] + v[2] + v[3] + v[4] + v[5];
     into[14] += (v[1] * q.input + v[2] * q.write5m + v[3] * q.write1h + v[4] * q.cacheRead + v[5] * q.output) / 1e6;
+    into[15] += v[1];
+    into[16] += v[2] + v[3];
+    into[17] += v[4];
+    into[18] += v[5];
+    into[19] += (v[1] * q.input) / 1e6;
+    into[20] += (v[2] * q.write5m + v[3] * q.write1h) / 1e6;
+    into[21] += (v[4] * q.cacheRead) / 1e6;
+    into[22] += (v[5] * q.output) / 1e6;
   }
 }
 
@@ -117,6 +126,8 @@ export type UsageView = {
   models: Array<{ model: string; tokens: number; cost: number; known: boolean }>;
   /** Subscription plan of each seat, when its login tells (usage/pricing.ts). */
   plans: Record<string, { label: string; monthlyUsd: number }>;
+  /** API-equivalent cost per period, global and per seat (see {@link UsageStore.apiCost}). */
+  apiCost: ApiCost;
   /** First day of the current month: the panel sums the month from there. */
   monthStart: string;
   pricesVerified: string;
@@ -316,6 +327,59 @@ export class UsageStore {
     return { tokens, usd };
   }
 
+  /**
+   * What the API would have billed, per period: the last 5h, today (local
+   * day), the last 7 and 30 days, everything tracked. Global and per seat
+   * (`unknown`: tokens no transcript ties to a seat, counted in the global
+   * figures). The rolling periods are hour-granular: the current hour plus
+   * the previous ones (5, 168, 720 hourly buckets).
+   */
+  apiCost(): ApiCost {
+    const now = this.now();
+    const lastHour = Math.floor(now / HOUR_MS);
+    const rolling: Array<[ApiPeriod, number]> = [
+      ['5h', 5],
+      ['7d', 7 * 24],
+      ['30d', 30 * 24],
+    ];
+    const all = blankPeriods();
+    const byAccount: Record<string, Record<ApiPeriod, CostBreakdown>> = {};
+    const add = (period: ApiPeriod, account: string, model: string, v: Vec): void => {
+      addCost(model, v, all[period]);
+      addCost(model, v, (byAccount[account] ??= blankPeriods())[period]);
+    };
+    for (const [h, bucket] of Object.entries(this.data.hours)) {
+      const age = lastHour - Number(h);
+      if (age < 0) continue;
+      for (const [ki, v] of Object.entries(bucket)) {
+        const [account, model] = this.data.keys[Number(ki)].split(SEP);
+        for (const [period, n] of rolling) if (age < n) add(period, account, model, v);
+      }
+    }
+    const today = dayOf(now);
+    for (const [day, bucket] of Object.entries(this.data.days)) {
+      for (const [ki, v] of Object.entries(bucket)) {
+        const [account, model] = this.data.keys[Number(ki)].split(SEP);
+        add('total', account, model, v);
+        if (day === today) add('today', account, model, v);
+      }
+    }
+    const from: Record<ApiPeriod, number | null> = {
+      '5h': (lastHour - 4) * HOUR_MS,
+      today: dayStart(today),
+      '7d': (lastHour - 7 * 24 + 1) * HOUR_MS,
+      '30d': (lastHour - 30 * 24 + 1) * HOUR_MS,
+      total: this.data.firstAt ?? null,
+    };
+    const finish = (ps: Record<ApiPeriod, CostBreakdown>): Record<ApiPeriod, CostBreakdown> => {
+      for (const k of API_PERIODS) roundCost(ps[k], from[k], now);
+      return ps;
+    };
+    finish(all);
+    for (const ps of Object.values(byAccount)) finish(ps);
+    return { periods: all, byAccount, pricesVerified: PRICES_VERIFIED };
+  }
+
   hourCount(): number {
     return Object.keys(this.data.hours).length;
   }
@@ -377,7 +441,7 @@ export class UsageStore {
 
     const round = (rows: Record<string, number[][]>): void => {
       for (const list of Object.values(rows)) {
-        for (const c of list) for (const j of [4, 5, 6, 7, 9, 10, 12, 14]) c[j] = Math.round(c[j] * 1e5) / 1e5;
+        for (const c of list) for (const j of [4, 5, 6, 7, 9, 10, 12, 14, 19, 20, 21, 22]) c[j] = Math.round(c[j] * 1e5) / 1e5;
       }
     };
     round(daily);
@@ -392,7 +456,9 @@ export class UsageStore {
     // what no transcript or record ties to a seat is shown as such.
     const nameOf = (id: string): string =>
       label.get(id) ?? (id === 'unknown' ? 'unattributed (before tracking)' : `${id} (removed seat)`);
-    const accounts = [...order, ...rest, ...(daily.unknown ? ['unknown'] : [])].map((id) => ({ id, label: nameOf(id) }));
+    // Tokens no transcript ties to a seat ("unknown") are not a series of their
+    // own: their rows stay in `daily` / `hourly`, so every total still counts them.
+    const accounts = [...order, ...rest].map((id) => ({ id, label: nameOf(id) }));
     return {
       version: this.version,
       generatedAt: now,
@@ -408,8 +474,97 @@ export class UsageStore {
         .map(([model, m]) => ({ model, tokens: m.tokens, cost: Math.round(m.cost * 100) / 100, known: priceOf(model).known }))
         .sort((a, b) => b.tokens - a.tokens),
       plans: opts.plans ?? {},
+      apiCost: this.apiCost(),
       monthStart: dayOf(now).slice(0, 8) + '01',
       pricesVerified: PRICES_VERIFIED,
     };
   }
+}
+
+export const API_PERIODS = ['5h', 'today', '7d', '30d', 'total'] as const;
+export type ApiPeriod = (typeof API_PERIODS)[number];
+
+/**
+ * API-equivalent cost of a period. The token kinds are the served model's
+ * own (advisor excluded); `advisor` is the advisor's calls whole, at its own
+ * model's price. `noCache`: the same tokens with every cache read and write
+ * billed as plain input; `cacheSaved` = noCache - total (negative when the
+ * writes cost more than the reads saved).
+ */
+export type CostBreakdown = {
+  from: number | null;
+  to: number;
+  requests: number;
+  tokens: { input: number; cacheWrite5m: number; cacheWrite1h: number; cacheRead: number; output: number; advisor: number; total: number };
+  usd: {
+    input: number;
+    cacheWrite5m: number;
+    cacheWrite1h: number;
+    cacheWrite: number;
+    cacheRead: number;
+    output: number;
+    advisor: number;
+    total: number;
+    noCache: number;
+    cacheSaved: number;
+  };
+  /** Tokens of models without a list price (counted at $0). */
+  unpricedTokens: number;
+};
+
+export type ApiCost = {
+  periods: Record<ApiPeriod, CostBreakdown>;
+  byAccount: Record<string, Record<ApiPeriod, CostBreakdown>>;
+  pricesVerified: string;
+};
+
+function blankCost(): CostBreakdown {
+  return {
+    from: null,
+    to: 0,
+    requests: 0,
+    tokens: { input: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0, output: 0, advisor: 0, total: 0 },
+    usd: { input: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheWrite: 0, cacheRead: 0, output: 0, advisor: 0, total: 0, noCache: 0, cacheSaved: 0 },
+    unpricedTokens: 0,
+  };
+}
+
+function blankPeriods(): Record<ApiPeriod, CostBreakdown> {
+  return { '5h': blankCost(), today: blankCost(), '7d': blankCost(), '30d': blankCost(), total: blankCost() };
+}
+
+/** Adds one (model, vector) to a breakdown, at that model's list price. */
+export function addCost(model: string, v: Vec, b: CostBreakdown): void {
+  const { price: q, known } = priceOf(model);
+  const tok = v[1] + v[2] + v[3] + v[4] + v[5];
+  const cost = (v[1] * q.input + v[2] * q.write5m + v[3] * q.write1h + v[4] * q.cacheRead + v[5] * q.output) / 1e6;
+  b.requests += v[0];
+  b.tokens.total += tok;
+  b.usd.total += cost;
+  b.usd.noCache += ((v[1] + v[2] + v[3] + v[4]) * q.input + v[5] * q.output) / 1e6;
+  if (!known) b.unpricedTokens += tok;
+  if (model.endsWith('@advisor')) {
+    b.tokens.advisor += tok;
+    b.usd.advisor += cost;
+    return;
+  }
+  b.tokens.input += v[1];
+  b.tokens.cacheWrite5m += v[2];
+  b.tokens.cacheWrite1h += v[3];
+  b.tokens.cacheRead += v[4];
+  b.tokens.output += v[5];
+  b.usd.input += (v[1] * q.input) / 1e6;
+  b.usd.cacheWrite5m += (v[2] * q.write5m) / 1e6;
+  b.usd.cacheWrite1h += (v[3] * q.write1h) / 1e6;
+  b.usd.cacheRead += (v[4] * q.cacheRead) / 1e6;
+  b.usd.output += (v[5] * q.output) / 1e6;
+}
+
+function roundCost(b: CostBreakdown, from: number | null, to: number): void {
+  const r = (x: number): number => Math.round(x * 1e4) / 1e4;
+  b.from = from;
+  b.to = to;
+  b.usd.cacheWrite = b.usd.cacheWrite5m + b.usd.cacheWrite1h;
+  b.usd.cacheSaved = b.usd.noCache - b.usd.total;
+  for (const k of Object.keys(b.usd) as Array<keyof CostBreakdown['usd']>) b.usd[k] = r(b.usd[k]);
 }
