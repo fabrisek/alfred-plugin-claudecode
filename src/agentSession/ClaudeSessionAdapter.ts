@@ -475,7 +475,10 @@ export class ClaudeSessionAdapter {
       // session started by hand there — plus Alfred's persona. Not
       // snapshotted, so persona edits reach resumed sessions.
       systemPrompt: { type: 'preset', preset: 'claude_code', append: buildAppendPrompt(req.persona, req.mcpServers ?? []), snapshot: false },
-      settingSources: ['user', 'project', 'local'],
+      // The project's settings only: the user level would add the account's
+      // synced organization skills and plugins (auto-memory and claude.ai
+      // connectors are off in the env, ISOLATION_ENV).
+      settingSources: ['project', 'local'],
       includePartialMessages: true,
       forwardSubagentText: true,
       // Only the MCP servers Alfred passes: the user's own servers (from

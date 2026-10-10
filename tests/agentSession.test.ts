@@ -200,7 +200,11 @@ describe('claude session adapter', () => {
     assert.equal(o.strictMcpConfig, true);
     assert.equal(o.includePartialMessages, true);
     assert.equal(o.resume, undefined);
-    assert.deepEqual(o.settingSources, ['user', 'project', 'local']);
+    // Not the user level: no synced organization skills or plugins.
+    assert.deepEqual(o.settingSources, ['project', 'local']);
+    // No auto-memory (shared projects/ dir) and no claude.ai connectors.
+    assert.equal((o.env as Record<string, string>).CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+    assert.equal((o.env as Record<string, string>).ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
     const sp = o.systemPrompt as { type: string; preset: string; append: string; snapshot: boolean };
     assert.equal(sp.preset, 'claude_code');
     assert.equal(sp.snapshot, false);

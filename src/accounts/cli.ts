@@ -80,9 +80,24 @@ export function buildChildEnv(pool: AccountPool, account: Account): Record<strin
   if (account.configDir) env.CLAUDE_CONFIG_DIR = account.configDir;
   const token = pool.tokenFor(account);
   if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
-  Object.assign(env, NO_EXTRA_USAGE_ENV);
+  Object.assign(env, NO_EXTRA_USAGE_ENV, ISOLATION_ENV);
   return env;
 }
+
+/**
+ * What the user's own Claude Code setup must not bring into a CLI this plugin
+ * starts (measured 2026-10-10 with tests/cli-context-probe.mjs):
+ * - Auto-memory: the seats share `projects/` with `~/.claude` (sharedSessions),
+ *   so a session would load, and could write, the user's personal memory of
+ *   that directory (5.7k tokens for the home directory). Alfred has its own.
+ * - claude.ai connectors (remote MCP servers of the account): 18 of them were
+ *   attached to every `claude_code_run` session, which has no strict MCP
+ *   config so that a project's own `.mcp.json` still works.
+ */
+export const ISOLATION_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+  ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+};
 
 /**
  * Never past a plan's limit (user rule): every CLI this plugin starts has

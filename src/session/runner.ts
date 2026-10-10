@@ -380,9 +380,12 @@ export class SessionRunner {
         message: `Tool "${toolName}" is not enabled for Alfred-delegated sessions.`,
       }),
       // The real Claude Code agent: its own system prompt, and the project's
-      // CLAUDE.md / settings, like a session started by hand in that directory.
+      // CLAUDE.md / settings / .mcp.json, like a session started by hand in
+      // that directory. Not the user level (organization skills and plugins
+      // synced from the account), nor auto-memory or claude.ai connectors
+      // (ISOLATION_ENV).
       systemPrompt: { type: 'preset', preset: 'claude_code' },
-      settingSources: ['user', 'project', 'local'],
+      settingSources: ['project', 'local'],
       env: buildChildEnv(pool, account),
       abortController: controller,
       stderr: (data: string) => {
