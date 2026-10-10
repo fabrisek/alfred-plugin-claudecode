@@ -115,6 +115,12 @@ export type EngineSessionRecord = {
    * marks them interrupted); the resume says the results follow.
    */
   awaitingTools?: string[];
+  /**
+   * Advisor model the session's processes run with (null = none; absent on
+   * older records). A resume keeps it, on any seat and at any size: turning it
+   * on or off changes the cached prefix and re-writes the whole conversation.
+   */
+  advisor?: string | null;
   updatedAt: number;
 };
 

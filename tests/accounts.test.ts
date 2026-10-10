@@ -112,6 +112,65 @@ describe('selection', () => {
     assert.equal(pool.pick({ model: 'opus' }).account?.id, a.id, 'all over: least used');
   });
 
+  it('last resort: a seat (or a whole organization) serves only when no other seat can', () => {
+    const pool = makePool(3);
+    const [perso, team1, team2] = pool.list();
+    pool.setIdentity(perso.id, { orgId: 'org-perso' });
+    pool.setIdentity(team1.id, { orgId: 'org-team' });
+    pool.setIdentity(team2.id, { orgId: 'org-team' });
+    // The personal seat has by far the most quota left: headroom alone would take it.
+    pool.setUsage(perso.id, usageAt(0));
+    pool.setUsage(team1.id, usageAt(80));
+    pool.setUsage(team2.id, usageAt(60));
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, perso.id, 'no tier: headroom decides');
+
+    pool.update(perso.id, { lastResort: true });
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, team2.id, 'tier first, headroom inside it');
+    pool.update(perso.id, { lastResort: false });
+    pool.updateSettings({ lastResortOrgs: ['org-perso'] });
+    assert.equal(pool.pick({ model: 'opus' }).account?.id, team2.id, 'org-level last resort');
+
+    // A thread already on the last-resort seat stays there.
+    assert.equal(pool.pick({ model: 'opus', prefer: perso.id }).account?.id, perso.id);
+
+    // Every Team seat out: the last resort serves, and says so.
+    pool.markExhausted(team1.id, Date.now() + 3_600_000, 'test');
+    pool.markExhausted(team2.id, Date.now() + 3_600_000, 'test');
+    const r = pool.pick({ model: 'opus' });
+    assert.equal(r.account?.id, perso.id);
+    assert.match(r.why ?? '', /last resort/);
+  });
+
+  it('a moving thread goes to a seat of the same organization (shared cache) before headroom', () => {
+    const pool = makePool(4);
+    const [teamA, teamB, other, teamC] = pool.list();
+    for (const s of [teamA, teamB, teamC]) pool.setIdentity(s.id, { orgId: 'org-team' });
+    pool.setIdentity(other.id, { orgId: 'org-other' });
+    pool.setUsage(teamA.id, usageAt(10));
+    pool.setUsage(teamB.id, usageAt(70));
+    pool.setUsage(teamC.id, usageAt(50));
+    pool.setUsage(other.id, usageAt(0));
+    pool.markExhausted(teamA.id, Date.now() + 3_600_000, 'test');
+
+    const r = pool.pick({ model: 'opus', prefer: teamA.id });
+    assert.equal(r.account?.id, teamC.id, 'same organization, most headroom among them');
+    assert.match(r.why ?? '', /cache warm from/);
+    assert.deepEqual(pool.cacheOutlook(teamA.id, teamC.id).cache, 'warm');
+    assert.deepEqual(pool.cacheOutlook(teamA.id, other.id).cache, 'cold');
+
+    // A prefix difference (the advisor) makes a same-organization seat cold.
+    const advisorOn = new Set([teamA.id, teamB.id]);
+    const sameCache = (to: { id: string }, from: { id: string }) => advisorOn.has(to.id) === advisorOn.has(from.id);
+    assert.equal(pool.pick({ model: 'opus', from: teamA.id, exclude: new Set([teamA.id]), sameCache }).account?.id, teamB.id);
+
+    // No warm seat left: cold move, ranked as usual.
+    pool.markExhausted(teamB.id, Date.now() + 3_600_000, 'test');
+    pool.markExhausted(teamC.id, Date.now() + 3_600_000, 'test');
+    const cold = pool.pick({ model: 'opus', prefer: teamA.id });
+    assert.equal(cold.account?.id, other.id);
+    assert.match(cold.why ?? '', /cache cold from/);
+  });
+
   it('seat order: first usable seat in the order, next one when exhausted or disabled', () => {
     const pool = makePool(3);
     const [a, b, c] = pool.list();

@@ -13,7 +13,7 @@ import type {
 // HTTP — but the request-lifetime and no-op-logger halves of the package are
 // transport-agnostic, so there is no reason to keep a second copy of them.
 import { Deadline, isAbortLike, noopLogger } from '@alfred/provider-openai-compat';
-import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from './accounts/pool.js';
+import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type CacheOutlook, type TokenSample } from './accounts/pool.js';
 import { buildChildEnv, type CliInfo } from './accounts/cli.js';
 import type { RateLimitInfo } from './accounts/usage.js';
 import type { CliProcessTracker } from './agentSession/processTracker.js';
@@ -561,19 +561,27 @@ export class ClaudeCodeProvider implements LLMProvider {
           if (req.signal?.aborted) throw abortError();
         }
       }
-      const pick = pool.pick({ model, pinned, exclude: tried, prefer, place: { thread: sessionKey, source: 'engine' } });
+      // A moving conversation keeps its cache on a seat of the same
+      // organization whose prefix is identical (same advisor setting).
+      const sameCache = (to: Account, from: Account): boolean =>
+        this.advisorFor(to.id, req, rec?.advisor) === this.advisorFor(from.id, req, rec?.advisor);
+      const pick = pool.pick({ model, pinned, exclude: tried, prefer, sameCache, place: { thread: sessionKey, source: 'engine' } });
       if (!pick.account) throw new Error(`${LABEL}: ${pick.reason}`);
       const account = pick.account;
       if (sessionKey && prefer && account.id !== prefer) {
         const owner = pool.get(prefer);
+        const outlook = pool.cacheOutlook(prefer, account.id, sameCache);
         this.log.warn('moving the conversation to another seat', {
           thread: sessionKey,
           from: prefer,
           to: account.id,
           why: tried.has(prefer) ? 'failed this request' : owner ? pool.unavailableReason(owner) ?? 'unknown' : 'seat removed',
           contextTokens,
-          // Every token of it is written again into the new seat's cache.
-          estimatedCacheWriteTokens: contextTokens,
+          // Warm: the new seat reads the conversation from the shared cache.
+          // Cold: every token of it is written again there.
+          cache: outlook.cache,
+          cacheWhy: outlook.why,
+          estimatedCacheWriteTokens: outlook.cache === 'warm' ? 0 : contextTokens,
         });
       }
       tried.add(account.id);
@@ -653,6 +661,23 @@ export class ClaudeCodeProvider implements LLMProvider {
       if (chunk.type === 'done') text = chunk.response.content;
     }
     return { text, accountId: account.id };
+  }
+
+  /**
+   * Advisor model a CLI of this request would run with on `accountId` (null =
+   * none): the session's own (`launched`, kept on resume) when known, else
+   * what the seat allows. Size limits aside: this compares prefixes of seats.
+   */
+  private advisorFor(accountId: string, req: ChatRequest, launched: string | null | undefined): string | null {
+    if (launched === null) return null;
+    return this.opts.advisor?.settingsFor(accountId, engineThread(req))?.advisorModel ?? null;
+  }
+
+  /** Whether the session `record` keeps its cache when resumed on `toId`. */
+  private seatMoveOutlook(record: EngineSessionRecord, toId: string, req: ChatRequest): CacheOutlook {
+    return this.opts.pool.cacheOutlook(record.accountId, toId, (to, from) =>
+      this.advisorFor(to.id, req, record.advisor) === this.advisorFor(from.id, req, record.advisor),
+    );
   }
 
   /**
@@ -796,7 +821,19 @@ export class ClaudeCodeProvider implements LLMProvider {
     // re-reads the whole context, uncached. A live process keeps the one it
     // was launched with (relaunching it would re-write the cached prefix).
     const advisorTooLarge = advisorLimit > 0 && contextTokens > advisorLimit;
-    const advisorSettings = advisorTooLarge ? undefined : this.opts.advisor?.settingsFor(account.id, engineThread(req));
+    // A session resumed by a new process (seat switch, expired process) keeps
+    // the advisor it was launched with, whatever its size now: turning it on
+    // or off changes the cached prefix (a tool and a system section) and
+    // re-writes the whole conversation.
+    const launched = sessionKey ? this.sessions?.record(sessionKey) : undefined;
+    const advisorSettings =
+      launched?.sessionId && launched.advisor !== undefined
+        ? launched.advisor
+          ? this.opts.advisor?.settingsFor(account.id, engineThread(req))
+          : undefined
+        : advisorTooLarge
+          ? undefined
+          : this.opts.advisor?.settingsFor(account.id, engineThread(req));
     if (advisorSettings) options.settings = advisorSettings;
     let advisorModel = advisorSettings?.advisorModel;
 
@@ -939,13 +976,17 @@ export class ClaudeCodeProvider implements LLMProvider {
         // have left its delta (or an API error) in the transcript.
         if (record.lastUuid) sessionOptions.resumeSessionAt = record.lastUuid;
         if (record.accountId !== account.id) {
+          const outlook = this.seatMoveOutlook(record, account.id, req);
           this.log.warn('continuing the Claude session on another seat', {
             thread: sessionKey,
             from: record.accountId,
             to: account.id,
             sessionId: record.sessionId,
-            // Written again in full into the new seat's prompt cache.
             contextTokens,
+            // Warm: read from the organization's shared cache. Cold: written
+            // again in full into the new seat's prompt cache.
+            cache: outlook.cache,
+            cacheWhy: outlook.why,
           });
         }
       }
@@ -966,7 +1007,12 @@ export class ClaudeCodeProvider implements LLMProvider {
     const expectedCold = coldReason({
       mode: sessionMode,
       planReason,
-      seatChanged: !!previousSeat && previousSeat !== account.id && sessionMode !== 'fresh',
+      // A seat switch within one organization, same prefix, reads the cache.
+      seatChanged:
+        !!previousSeat &&
+        previousSeat !== account.id &&
+        sessionMode !== 'fresh' &&
+        (!previous || this.seatMoveOutlook(previous, account.id, req).cache === 'cold'),
       idleMs: previousTurnAt !== undefined ? Date.now() - previousTurnAt : undefined,
       ttlMs: ttl,
       keyed: !!sessionKey,
@@ -1536,6 +1582,8 @@ export class ClaudeCodeProvider implements LLMProvider {
           record.interruptedTail = userStopped;
           record.hostCutTail = hostInterrupted && !userStopped;
           record.lastUuid = replyUuid;
+          // The advisor its processes run with: a resume keeps it (same prefix).
+          record.advisor = advisorModel ?? null;
           if (suspended) record.awaitingTools = hostCalls.map((c) => c.id);
           else delete record.awaitingTools;
           // The notes went out with this request (hostCutNote.ts).

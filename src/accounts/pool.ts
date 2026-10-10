@@ -39,6 +39,12 @@ export type Account = {
   configDir: string | null;
   /** Also list `<model>@<id>` variants in the model picker, to pin agents to this seat. */
   exposeModels: boolean;
+  /**
+   * Last resort: a new thread is placed here, and a moving thread moves here,
+   * only when no other seat can serve (see {@link AccountPool.tierOf}). A
+   * thread already on it stays (moving it would re-write its whole cache).
+   */
+  lastResort?: boolean;
   createdAt: number;
 };
 
@@ -63,6 +69,11 @@ export type AccountRuntime = {
   requests: number;
   email?: string;
   orgName?: string;
+  /**
+   * `organizationUuid` of the seat's login. The prompt cache is shared by the
+   * seats of one organization, never across organizations.
+   */
+  orgId?: string;
   subscriptionType?: string;
 };
 
@@ -87,6 +98,11 @@ export type PoolSettings = {
    * seat). 0 = no cap.
    */
   fillMaxInFlight: number;
+  /**
+   * Organizations (`organizationUuid`) whose seats are all last resort, as if
+   * each had {@link Account.lastResort}: e.g. a personal plan next to a Team.
+   */
+  lastResortOrgs?: string[];
 };
 
 /** Token counts as the CLI reports them in each turn's `result.usage`. */
@@ -168,6 +184,32 @@ const DEFAULT_ACCOUNT_ID = 'default';
 export type PickResult =
   | { account: Account; reason?: undefined; why?: string }
   | { account?: undefined; reason: string; why?: undefined };
+
+/**
+ * What moving a thread's cached prefix from one seat to another costs: `warm`
+ * = the target can read it (same seat, or same organization with an identical
+ * prefix), `cold` = it is written again in full.
+ */
+export type CacheOutlook = { cache: 'warm' | 'cold'; why: string };
+
+/** Extra condition for a warm move (e.g. the same advisor setting: it changes the prefix). */
+export type SameCache = (candidate: Account, from: Account) => boolean;
+
+export type PickArgs = {
+  model: string;
+  pinned?: string;
+  exclude?: Set<string>;
+  /** The thread's seat: kept while it can serve. */
+  prefer?: string;
+  /**
+   * The seat the thread's cache lives on when it is moving off it (mid-turn
+   * switch). Defaults to `prefer` when that seat cannot serve.
+   */
+  from?: string;
+  /** Extra condition for a warm move (see {@link AccountPool.cacheOutlook}). */
+  sameCache?: SameCache;
+  place?: Placement;
+};
 
 /** Who asks for a seat, when the pick places a new thread (logged). */
 export type Placement = { thread?: string | null; source: string };
@@ -303,6 +345,9 @@ export class AccountPool {
     if (typeof patch.fillMaxInFlight === 'number' && Number.isFinite(patch.fillMaxInFlight)) {
       s.fillMaxInFlight = Math.min(64, Math.max(0, Math.round(patch.fillMaxInFlight)));
     }
+    if (Array.isArray(patch.lastResortOrgs)) {
+      s.lastResortOrgs = [...new Set(patch.lastResortOrgs.filter((x): x is string => typeof x === 'string' && x.length > 0))];
+    }
     this.save();
     return s;
   }
@@ -381,8 +426,12 @@ export class AccountPool {
     return account;
   }
 
-  update(id: string, patch: Partial<Pick<Account, 'label' | 'enabled' | 'exposeModels' | 'auth'>>): Account {
+  update(id: string, patch: Partial<Pick<Account, 'label' | 'enabled' | 'exposeModels' | 'auth' | 'lastResort'>>): Account {
     const a = this.require(id);
+    if (typeof patch.lastResort === 'boolean') {
+      if (patch.lastResort) a.lastResort = true;
+      else delete a.lastResort;
+    }
     if (typeof patch.label === 'string' && patch.label.trim()) a.label = patch.label.trim();
     if (typeof patch.enabled === 'boolean') a.enabled = patch.enabled;
     if (typeof patch.exposeModels === 'boolean') a.exposeModels = patch.exposeModels;
@@ -530,10 +579,11 @@ export class AccountPool {
     this.touch();
   }
 
-  setIdentity(id: string, info: { email?: string; orgName?: string; subscriptionType?: string }): void {
+  setIdentity(id: string, info: { email?: string; orgName?: string; orgId?: string; subscriptionType?: string }): void {
     const rt = this.runtime(id);
     if (info.email) rt.email = info.email;
     if (info.orgName) rt.orgName = info.orgName;
+    if (info.orgId) rt.orgId = info.orgId;
     if (info.subscriptionType) rt.subscriptionType = info.subscriptionType;
     this.touch();
   }
@@ -724,8 +774,14 @@ export class AccountPool {
    * conversation moves only when its seat is really out (exhausted, auth).
    *
    * A pinned seat is tried first when usable; otherwise the pool takes over.
+   *
+   * Before any strategy: only the lowest {@link tierOf} tier with a usable
+   * seat is considered (last-resort seats serve when nothing else can), and a
+   * thread moving off a seat (`from`, or a `prefer` that cannot serve) goes
+   * to a seat where its cache stays warm ({@link cacheOutlook}) when that
+   * tier has one. The strategy only ranks what is left.
    */
-  pick(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string; place?: Placement }): PickResult {
+  pick(args: PickArgs): PickResult {
     const r = this.choose(args);
     if (args.place && r.account && r.why) {
       this.opts.logger.info('thread placed on a seat', {
@@ -740,26 +796,106 @@ export class AccountPool {
     return r;
   }
 
-  private choose(args: { model: string; pinned?: string; exclude?: Set<string>; prefer?: string }): PickResult {
+  /**
+   * Organization of a seat (`organizationUuid`): the runtime copy, else read
+   * once from the seat's `.claude.json`. Undefined = not known (no login yet).
+   */
+  orgOf(a: Account): string | undefined {
+    const rt = this.runtime(a.id);
+    if (rt.orgId) return rt.orgId;
+    try {
+      const raw = JSON.parse(readFileSync(this.globalConfigPath(a), 'utf8')) as {
+        oauthAccount?: { organizationUuid?: unknown };
+      };
+      const org = raw.oauthAccount?.organizationUuid;
+      if (typeof org === 'string' && org) {
+        rt.orgId = org;
+        this.touch();
+        return org;
+      }
+    } catch {
+      // No config yet.
+    }
+    return undefined;
+  }
+
+  /**
+   * Placement tier of a seat: 0 = normal, 1 = last resort (the seat's own
+   * `lastResort`, or its organization in `lastResortOrgs`). A new or moving
+   * thread only goes to the lowest tier that has a usable seat.
+   */
+  tierOf(a: Account): number {
+    if (a.lastResort) return 1;
+    const orgs = this.state.settings.lastResortOrgs;
+    if (orgs && orgs.length > 0) {
+      const org = this.orgOf(a);
+      if (org && orgs.includes(org)) return 1;
+    }
+    return 0;
+  }
+
+  /**
+   * Whether a thread whose cache lives on `fromId` keeps it on `toId`.
+   * Anthropic isolates the prompt cache per organization: seats of one
+   * organization share it (measured 2026-10-10: a session resumed on another
+   * Team seat read its whole prefix back), another organization never does.
+   * The prefix must also be byte-identical: `sameCache` checks what the caller
+   * sets per seat (the advisor adds a tool and a system section).
+   */
+  cacheOutlook(fromId: string | undefined, toId: string, sameCache?: SameCache): CacheOutlook {
+    if (!fromId) return { cache: 'cold', why: 'no previous seat' };
+    if (fromId === toId) return { cache: 'warm', why: 'same seat' };
+    const from = this.get(fromId);
+    const to = this.get(toId);
+    if (!from || !to) return { cache: 'cold', why: 'seat removed' };
+    const a = this.orgOf(from);
+    const b = this.orgOf(to);
+    if (!a || !b) return { cache: 'cold', why: 'organization unknown' };
+    if (a !== b) return { cache: 'cold', why: 'other organization: caches never cross organizations' };
+    if (sameCache && !sameCache(to, from)) return { cache: 'cold', why: 'same organization, but the prompt prefix differs (advisor)' };
+    return { cache: 'warm', why: 'same organization' };
+  }
+
+  private choose(args: PickArgs): PickResult {
     const now = this.now();
     const { threshold, strategy } = this.state.settings;
     const exclude = args.exclude ?? new Set<string>();
-    const usable = this.list().filter((a) => !exclude.has(a.id) && this.unavailableReason(a, now) === null);
+    const available = this.list().filter((a) => !exclude.has(a.id) && this.unavailableReason(a, now) === null);
 
     if (args.pinned) {
-      const pinned = usable.find((a) => a.id === args.pinned);
+      const pinned = available.find((a) => a.id === args.pinned);
       if (pinned) return { account: pinned };
     }
-    if (usable.length === 0) return { reason: this.exhaustedMessage(args.model, exclude, now) };
+    if (available.length === 0) return { reason: this.exhaustedMessage(args.model, exclude, now) };
 
     // Seat affinity: a conversation's prompt cache lives on the seat that
     // served it, so it stays there while that seat can serve at all. In-flight
-    // caps and the threshold are about spreading new conversations, not this one.
+    // caps and the threshold are about spreading new conversations, not this
+    // one; nor is the tier: a thread already on a last-resort seat stays.
     if (args.prefer) {
-      const sticky = usable.find((a) => a.id === args.prefer);
+      const sticky = available.find((a) => a.id === args.prefer);
       if (sticky) return { account: sticky };
     }
 
+    // Tier first: last-resort seats only when no normal seat can serve.
+    const tier = Math.min(...available.map((a) => this.tierOf(a)));
+    let usable = available.filter((a) => this.tierOf(a) === tier);
+    // A moving thread: a seat of this tier that keeps its cache warm, if any.
+    const from = args.from ?? args.prefer;
+    let cacheNote = '';
+    if (from) {
+      const warm = usable.filter((a) => this.cacheOutlook(from, a.id, args.sameCache).cache === 'warm');
+      if (warm.length > 0) usable = warm;
+      cacheNote = `cache ${warm.length > 0 ? 'warm' : 'cold'} from ${from}`;
+    }
+    const r = this.rank(usable, args.model, now, threshold, strategy);
+    const why = [r.why, tier > 0 ? 'last resort: no other seat can serve' : '', cacheNote].filter(Boolean).join('; ');
+    return { account: r.account, why };
+  }
+
+  /** The strategy's choice among `usable` (non-empty, one tier). */
+  private rank(usable: Account[], model: string, now: number, threshold: number, strategy: Strategy): { account: Account; why: string } {
+    const args = { model };
     const scored = usable.map((a) => ({
       a,
       pct: relevantPercent(this.runtime(a.id).usage, args.model, now),

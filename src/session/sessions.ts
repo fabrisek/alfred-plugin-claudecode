@@ -183,7 +183,7 @@ export function seatForResume(
   const why = pool.unavailableReason(account, now);
   if (why === null && !cross?.exclude?.has(account.id)) return { account };
   if (cross?.crossSeat) {
-    const other = pool.pick({ model: cross.model, exclude: new Set([account.id, ...(cross.exclude ?? [])]) });
+    const other = pool.pick({ model: cross.model, exclude: new Set([account.id, ...(cross.exclude ?? [])]), from: account.id });
     if (other.account) return { account: other.account };
   }
   if (why === null) return { code: 'unavailable', error: `Session ${sessionId}: no other seat can serve it right now.` };

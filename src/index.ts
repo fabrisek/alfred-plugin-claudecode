@@ -250,11 +250,12 @@ class UsageRefresher {
     if (a.auth !== 'login') return;
     try {
       const raw = JSON.parse(await readFile(this.pool.globalConfigPath(a), 'utf8')) as {
-        oauthAccount?: { emailAddress?: string; organizationName?: string };
+        oauthAccount?: { emailAddress?: string; organizationName?: string; organizationUuid?: string };
       };
       this.pool.setIdentity(a.id, {
         email: raw.oauthAccount?.emailAddress,
         orgName: raw.oauthAccount?.organizationName,
+        orgId: raw.oauthAccount?.organizationUuid,
       });
     } catch {
       // No config yet: not logged in, or never run.
@@ -445,8 +446,8 @@ const plugin: AlfredPlugin = {
       'updateAccount',
       safe((args) => {
         const id = requireId(args);
-        const a = args as { label?: string; enabled?: boolean; exposeModels?: boolean };
-        pool.update(id, { label: a.label, enabled: a.enabled, exposeModels: a.exposeModels });
+        const a = args as { label?: string; enabled?: boolean; exposeModels?: boolean; lastResort?: boolean };
+        pool.update(id, { label: a.label, enabled: a.enabled, exposeModels: a.exposeModels, lastResort: a.lastResort });
         return {};
       }),
     );

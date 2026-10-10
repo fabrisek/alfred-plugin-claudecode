@@ -22,7 +22,7 @@ import type {
   SessionTurnRequest,
   SessionUsage,
 } from '@alfred/sdk';
-import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type TokenSample } from '../accounts/pool.js';
+import { THROTTLE_BACKOFF_MS, type Account, type AccountPool, type PickResult, type TokenSample } from '../accounts/pool.js';
 import { buildChildEnv, type CliInfo } from '../accounts/cli.js';
 import { cliThread, isAdvisorRefusal, type AdvisorPolicy } from '../accounts/advisor.js';
 import type { RateLimitInfo } from '../accounts/usage.js';
@@ -400,7 +400,12 @@ export class ClaudeSessionAdapter {
       const f = r.failure;
       const sessionPortable = crossSeat || (createdThisTurn && !r.sawOutput);
       const mayContinue = !turn.interrupted && !turn.hardStopped && (!r.sawOutput || this.opts.config.autoSwitchMidTurn) && sessionPortable;
-      const next = mayContinue ? pool.pick({ model, exclude: tried }) : undefined;
+      // Same organization and same advisor setting first: the session's
+      // cached prefix is then read back on the new seat, not re-written.
+      const thread = cliThread(req.conversationId);
+      const advisorOn = (id: string): string | null => this.opts.advisor?.settingsFor(id, thread)?.advisorModel ?? null;
+      const sameCache = (to: Account, from: Account): boolean => advisorOn(to.id) === advisorOn(from.id);
+      const next: PickResult | undefined = mayContinue ? pool.pick({ model, exclude: tried, from: account.id, sameCache }) : undefined;
       if (!next?.account) {
         const resetsAt = f.resetsAt ?? earliestReset(pool, this.now());
         if (usage) emit({ type: 'usage', scope: 'turn', usage });
@@ -417,7 +422,16 @@ export class ClaudeSessionAdapter {
         return;
       }
       emit({ type: 'seat_switch', from: account.id, to: next.account.id, reason: `${f.kind}: ${f.message}`.slice(0, 300) });
-      this.opts.logger.warn('claude session switching seat', { turnId: req.turnId, from: account.id, to: next.account.id, kind: f.kind });
+      const outlook = pool.cacheOutlook(account.id, next.account.id, sameCache);
+      this.opts.logger.warn('claude session switching seat', {
+        turnId: req.turnId,
+        from: account.id,
+        to: next.account.id,
+        kind: f.kind,
+        // Warm: the session is read from the organization's shared cache.
+        cache: outlook.cache,
+        cacheWhy: outlook.why,
+      });
       if (!crossSeat && !r.sawOutput && createdThisTurn) {
         // The new session never produced anything and this seat cannot see
         // it: start it afresh on the next seat.

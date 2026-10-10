@@ -299,7 +299,8 @@ export class SessionRunner {
         if (!outcome.switchable || run.request.sessionId || run.cancelled || run.timedOut) break;
         run.switchedFrom.push(`${account.label}: ${outcome.error ?? 'failed'}`);
         logger.warn('session switching Claude account', { run: run.id, from: account.id });
-        const next = pool.pick({ model: run.request.model, exclude: tried });
+        // Same organization first: a resumed session reads its cache back.
+        const next = pool.pick({ model: run.request.model, exclude: tried, from: account.id });
         if (!next.account) {
           outcome = { ...outcome, error: `${outcome.error ?? 'failed'}. ${next.reason}` };
           break;
