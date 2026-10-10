@@ -149,7 +149,7 @@
       "compactAtTokens": {
         "type": "number",
         "label": "Compact conversations at (tokens)",
-        "description": "Prompt size at which Alfred compacts an engine conversation (summary of the older turns, recent ones kept verbatim), even though the model's window is larger. Every call re-reads the whole prompt and every cache miss re-writes it, so a smaller prompt saves seat quota. 0 = compact only when the window itself is nearly full.",
+        "description": "Prompt size at which Alfred compacts an engine conversation (summary of the older turns, recent ones kept verbatim), even though the model's window is larger. Every call re-reads the whole prompt and every cache miss re-writes it, so a smaller prompt saves seat quota. 0 = compact only when the window itself is nearly full. Needs a plugin reload.",
         "default": 200000,
         "min": 0,
         "step": 10000,
