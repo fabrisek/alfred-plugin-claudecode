@@ -451,6 +451,28 @@ export class EngineSessions {
     });
   }
 
+  /**
+   * Move a thread to another seat by hand: its next request is placed there
+   * (the record's seat is the pool's `prefer`). The idle process, if any, is
+   * closed. With a shared transcript store (`crossSeat`) the new seat resumes
+   * the same session; otherwise it starts a fresh one from the full history.
+   * Either way the move re-writes the thread's prefix once on the new seat
+   * unless both seats share the organization's cache.
+   */
+  reassign(key: string, accountId: string, opts: { crossSeat: boolean }): { from: string; to: string; session: 'resume' | 'fresh' } {
+    const rec = this.record(key);
+    if (!rec) throw new Error(`No engine session for thread "${key}".`);
+    const live = this.getLive(key);
+    if (live?.busy) throw new Error('This thread has a request running: reassign it once it is idle.');
+    if (live) this.closeSession(live, 'thread reassigned to another seat');
+    const from = rec.accountId;
+    rec.accountId = accountId;
+    if (!opts.crossSeat) rec.sessionId = null;
+    this.save(rec);
+    this.log.info('thread reassigned to another seat', { thread: key, from, to: accountId });
+    return { from, to: accountId, session: rec.sessionId ? 'resume' : 'fresh' };
+  }
+
   forget(key: string): void {
     this.records.delete(key);
     try {

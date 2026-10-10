@@ -783,3 +783,43 @@ describe('engine sessions: cache-preserving behaviour (2026-10-10)', () => {
     p.dispose();
   });
 });
+
+describe('engine sessions: reassign a thread by hand', () => {
+  const rec = (key: string, accountId: string): EngineSessionRecord => ({
+    key,
+    sessionId: 'sess-1',
+    accountId,
+    launchSystem: SYSTEM,
+    currentSystem: SYSTEM,
+    history: [],
+    updatedAt: Date.now(),
+  });
+
+  it('moves the record to the new seat and keeps the session when transcripts are shared', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'reassign-')), logger);
+    sessions.save(rec('conv|alfred|', 'personal'));
+    const r = sessions.reassign('conv|alfred|', 'team-a', { crossSeat: true });
+    assert.deepEqual(r, { from: 'personal', to: 'team-a', session: 'resume' });
+    // Persisted: a fresh instance (plugin reload) reads the new seat.
+    const reread = new EngineSessions((sessions as unknown as { dir: string }).dir, logger).record('conv|alfred|');
+    assert.equal(reread?.accountId, 'team-a');
+    assert.equal(reread?.sessionId, 'sess-1');
+  });
+
+  it('drops the session id when the new seat cannot read the transcript', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'reassign-')), logger);
+    sessions.save(rec('conv|alfred|', 'personal'));
+    const r = sessions.reassign('conv|alfred|', 'team-a', { crossSeat: false });
+    assert.equal(r.session, 'fresh');
+    assert.equal(sessions.record('conv|alfred|')?.sessionId, null);
+  });
+
+  it('refuses an unknown thread and a thread with a request running', () => {
+    const sessions = new EngineSessions(mkdtempSync(join(dir, 'reassign-')), logger);
+    assert.throws(() => sessions.reassign('nope', 'team-a', { crossSeat: true }), /No engine session/);
+    sessions.save(rec('busy|alfred|', 'personal'));
+    sessions.add({ key: 'busy|alfred|', busy: true, dead: false } as unknown as LiveSession);
+    assert.throws(() => sessions.reassign('busy|alfred|', 'team-a', { crossSeat: true }), /request running/);
+    assert.equal(sessions.record('busy|alfred|')?.accountId, 'personal');
+  });
+});

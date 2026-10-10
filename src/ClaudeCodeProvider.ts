@@ -1720,6 +1720,17 @@ export class ClaudeCodeProvider implements LLMProvider {
     this.sessions.close(key, reason === 'stopped' ? 'sub-agent stopped' : `thread ended: ${reason}`);
   }
 
+  /** Seat a thread's engine session lives on, if it has one. */
+  threadSeat(key: string): string | undefined {
+    return this.sessions?.record(key)?.accountId;
+  }
+
+  /** Move a thread to another seat for its next request (see {@link EngineSessions.reassign}). */
+  reassignThread(key: string, accountId: string): { from: string; to: string; session: 'resume' | 'fresh' } {
+    if (!this.sessions) throw new Error('Engine sessions are off: threads have no seat to move.');
+    return this.sessions.reassign(key, accountId, { crossSeat: this.opts.crossSeat?.() ?? false });
+  }
+
   /** Close every live engine session (plugin deactivation). */
   dispose(): void {
     this.dropLoadSource();

@@ -452,6 +452,35 @@ const plugin: AlfredPlugin = {
       }),
     );
 
+    // Move one thread (engine session key, `conversationId|agent|…`) to another
+    // seat for its next request. `accountId` omitted: the seat the pool would
+    // give a new thread now, other than its current one. Costs one re-write of
+    // the thread's prefix when the seats are in different organizations.
+    ctx.registerAction(
+      'reassignThread',
+      safe((args) => {
+        const a = (args ?? {}) as { thread?: unknown; accountId?: unknown };
+        const thread = String(a.thread ?? '');
+        if (!thread) throw new Error('thread required (engine session key).');
+        const p = providerRef;
+        if (!p) throw new Error('Provider not ready.');
+        const current = p.threadSeat(thread);
+        if (!current) throw new Error(`No engine session for thread "${thread}".`);
+        let target = a.accountId === undefined ? '' : String(a.accountId);
+        if (target) {
+          const account = pool.get(target);
+          if (!account) throw new Error(`Unknown account "${target}".`);
+          const why = pool.unavailableReason(account);
+          if (why) throw new Error(`${account.label}: ${why}`);
+        } else {
+          const pick = pool.pick({ model: firstModel(cfg.modelsRaw), exclude: new Set([current]) });
+          if (!pick.account) throw new Error(pick.reason);
+          target = pick.account.id;
+        }
+        return p.reassignThread(thread, target);
+      }),
+    );
+
     ctx.registerAction(
       'setPreferred',
       safe((args) => {
